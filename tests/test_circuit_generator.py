@@ -1,5 +1,5 @@
 """
-Unit tests for verify_nauty in circuit_generator.py.
+Unit tests for circuit_generator.py.
 """
 
 import inspect
@@ -46,7 +46,7 @@ for _mod in ['schemdraw', 'schemdraw.elements', 'schemdraw.logic',
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import rysy_dl  # noqa: E402 --- needed to patch rysy_dl.circuit_generator_display directly (see below)
 from rysy_dl.circuit_generator import (  # noqa: E402 --- tell linter to ignore import position
-    verify_nauty, generate_nauty_digraphs, nauty_to_networkx,
+    verify_nauty, find_nauty, generate_nauty_digraphs, nauty_to_networkx,
     _add_single_sink, assign_all_gates_and, assign_gates_randomly_ensure_diversity,
     assign_gates_randomly, all_gate_assignment, generate_circuits,
     _not_node_inserter, insert_random_source_edge_nots,
@@ -78,15 +78,11 @@ def _touch(path, executable=True):
         _make_non_executable(path)
 
 
-def _real_nauty_dir():
-    """Mirror generate_nauty_digraphs's own default resolution of nauty_dir, so the
-    skip condition below checks the same location a real call would use."""
-    return os.environ.get('NAUTY', os.path.expandvars('$HOME/nauty2_9_3'))
-
-
 def _real_nauty_available():
+    """Use the same lookup generate_nauty_digraphs uses, so the skip condition below
+    checks the same locations a real call would use."""
     try:
-        verify_nauty(_real_nauty_dir())
+        find_nauty()
         return True
     except (NotADirectoryError, FileNotFoundError, PermissionError):
         return False
@@ -238,6 +234,101 @@ def test_permissionerror_message_includes_binary_name(tmp_path):
     with pytest.raises(PermissionError, match='geng'):
         verify_nauty(str(tmp_path))
 
+
+def test_valid_directory_returns_paths(tmp_path):
+    _touch(str(tmp_path / 'geng'))
+    _touch(str(tmp_path / 'directg'))
+    assert verify_nauty(str(tmp_path)) == {
+        'geng': str(tmp_path / 'geng'),
+        'directg': str(tmp_path / 'directg'),
+    }
+
+
+def test_prefixed_names_accepted(tmp_path):
+    """Debian/Ubuntu's apt package installs nauty-geng and nauty-directg."""
+    _touch(str(tmp_path / 'nauty-geng'))
+    _touch(str(tmp_path / 'nauty-directg'))
+    assert verify_nauty(str(tmp_path)) == {
+        'geng': str(tmp_path / 'nauty-geng'),
+        'directg': str(tmp_path / 'nauty-directg'),
+    }
+
+
+def test_plain_name_preferred_over_prefixed(tmp_path):
+    for name in ('geng', 'nauty-geng', 'directg', 'nauty-directg'):
+        _touch(str(tmp_path / name))
+    assert verify_nauty(str(tmp_path)) == {
+        'geng': str(tmp_path / 'geng'),
+        'directg': str(tmp_path / 'directg'),
+    }
+
+
+def test_executable_prefixed_name_used_when_plain_name_not_executable(tmp_path):
+    _touch(str(tmp_path / 'geng'), executable=False)
+    _touch(str(tmp_path / 'nauty-geng'))
+    _touch(str(tmp_path / 'directg'))
+    assert verify_nauty(str(tmp_path))['geng'] == str(tmp_path / 'nauty-geng')
+
+# ── test find_nauty ─────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def nauty_search_env(tmp_path, monkeypatch):
+    """Isolate find_nauty from the real machine: no $NAUTY, and a PATH holding only an
+    empty `bin` directory. Tests add binaries to `bin` as needed."""
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    monkeypatch.delenv('NAUTY', raising=False)
+    monkeypatch.setenv('PATH', str(bin_dir))
+    return bin_dir
+
+
+def _install_nauty(directory, prefix=''):
+    os.makedirs(directory, exist_ok=True)
+    _touch(os.path.join(directory, prefix + 'geng'))
+    _touch(os.path.join(directory, prefix + 'directg'))
+
+
+def test_find_nauty_uses_explicit_dir(tmp_path, nauty_search_env):
+    _install_nauty(str(tmp_path / 'explicit'))
+    assert find_nauty(str(tmp_path / 'explicit'))['geng'] == str(tmp_path / 'explicit' / 'geng')
+
+
+def test_find_nauty_uses_nauty_env_var(tmp_path, nauty_search_env, monkeypatch):
+    _install_nauty(str(tmp_path / 'env'))
+    monkeypatch.setenv('NAUTY', str(tmp_path / 'env'))
+    assert find_nauty()['geng'] == str(tmp_path / 'env' / 'geng')
+
+
+def test_find_nauty_explicit_dir_does_not_fall_back_to_path(tmp_path, nauty_search_env):
+    """A directory the user named is used as-is, so a typo is reported instead of
+    silently running some other nauty from PATH."""
+    _install_nauty(str(nauty_search_env))
+    with pytest.raises(NotADirectoryError):
+        find_nauty(str(tmp_path / 'typo'))
+
+
+@pytest.mark.parametrize('prefix', ['', 'nauty-'])
+def test_find_nauty_falls_back_to_path(nauty_search_env, prefix):
+    bin_dir = nauty_search_env
+    _install_nauty(str(bin_dir), prefix=prefix)
+    assert find_nauty() == {
+        'geng': str(bin_dir / f'{prefix}geng'),
+        'directg': str(bin_dir / f'{prefix}directg'),
+    }
+
+
+def test_find_nauty_ignores_home_nauty2_9_3(tmp_path, nauty_search_env, monkeypatch):
+    """~/nauty2_9_3 used to be searched by default; it no longer is."""
+    monkeypatch.setenv('HOME', str(tmp_path))
+    _install_nauty(str(tmp_path / 'nauty2_9_3'))
+    with pytest.raises(FileNotFoundError):
+        find_nauty()
+
+
+def test_find_nauty_not_found_anywhere(nauty_search_env):
+    with pytest.raises(FileNotFoundError, match='NAUTY'):
+        find_nauty()
+
  # ── test generate_nauty_digraphs ────────────────────────────────────────────────
 
 def _mock_popen_proc():
@@ -251,51 +342,48 @@ def _mock_popen_proc():
     return mock_proc
 
 
-def test_generate_nauty_digraphs_calls_verify_nauty_with_correct_nauty_dir(tmp_path, monkeypatch):
-    """generate_nauty_digraphs must verify the nauty binaries before running the
-    geng | directg pipeline, using whichever nauty_dir it resolves (explicit argument,
-    $NAUTY, or the ~/nauty2_9_3 default) -- so a bad/missing install fails fast with a
-    clear error instead of a cryptic subprocess failure. verify_nauty runs eagerly
-    (generate_nauty_digraphs isn't itself a generator function -- it calls verify_nauty
-    and subprocess.Popen directly, only wrapping the stdout-reading loop in a nested
-    generator), so simply calling the function -- with no iteration -- is enough to
-    trigger it.
+def test_generate_nauty_digraphs_calls_find_nauty_with_nauty_dir(tmp_path):
+    """generate_nauty_digraphs must locate the nauty binaries (via find_nauty, which
+    tests above cover in detail) before running the geng | directg pipeline -- so a
+    bad/missing install fails fast with a clear error instead of a cryptic subprocess
+    failure. find_nauty runs eagerly (generate_nauty_digraphs isn't itself a generator
+    function -- it calls find_nauty and subprocess.Popen directly, only wrapping the
+    stdout-reading loop in a nested generator), so simply calling the function -- with
+    no iteration -- is enough to trigger it.
     """
-    # 1. Explicit nauty_dir argument takes priority and is passed through as-is.
-    with patch('rysy_dl.circuit_generator.verify_nauty') as mock_verify, \
-         patch('rysy_dl.circuit_generator.subprocess.Popen', return_value=_mock_popen_proc()) as mock_popen:
-        generate_nauty_digraphs(2, nauty_dir=str(tmp_path))
+    found = {'geng': '/found/nauty-geng', 'directg': '/found/nauty-directg'}
 
-    mock_verify.assert_called_once_with(str(tmp_path))
-    mock_popen.assert_called_once()
+    # 1. nauty_dir is passed through as-is, and the paths find_nauty returns are the
+    # ones the pipeline runs (prefixed names included).
+    for nauty_dir in (str(tmp_path), None):
+        with patch('rysy_dl.circuit_generator.find_nauty', return_value=found) as mock_find, \
+             patch('rysy_dl.circuit_generator.subprocess.Popen', return_value=_mock_popen_proc()) as mock_popen:
+            generate_nauty_digraphs(2, nauty_dir=nauty_dir)
 
-    # 2. nauty_dir=None falls back to the $NAUTY environment variable.
-    monkeypatch.setenv('NAUTY', '/env/nauty/dir')
-    with patch('rysy_dl.circuit_generator.verify_nauty') as mock_verify, \
-         patch('rysy_dl.circuit_generator.subprocess.Popen', return_value=_mock_popen_proc()):
-        generate_nauty_digraphs(2)
+        mock_find.assert_called_once_with(nauty_dir)
+        cmd = mock_popen.call_args.args[0]
+        assert cmd[-1] == '/found/nauty-geng 2 | /found/nauty-directg -aTq'
 
-    mock_verify.assert_called_once_with('/env/nauty/dir')
-
-    # 3. With no explicit argument and no $NAUTY, it falls back to ~/nauty2_9_3.
-    monkeypatch.delenv('NAUTY', raising=False)
-    with patch('rysy_dl.circuit_generator.verify_nauty') as mock_verify, \
-         patch('rysy_dl.circuit_generator.subprocess.Popen', return_value=_mock_popen_proc()):
-        generate_nauty_digraphs(2)
-
-    mock_verify.assert_called_once_with(os.path.expandvars('$HOME/nauty2_9_3'))
-
-    # 4. If verify_nauty rejects the directory, the pipeline must never be started --
-    # the exception should propagate straight out of generate_nauty_digraphs itself,
-    # since verify_nauty runs before subprocess.Popen and before any generator is
-    # handed back to the caller.
-    with patch('rysy_dl.circuit_generator.verify_nauty', side_effect=FileNotFoundError('missing geng')) as mock_verify, \
+    # 2. If find_nauty fails, the pipeline must never be started -- the exception
+    # should propagate straight out of generate_nauty_digraphs itself, since
+    # find_nauty runs before subprocess.Popen and before any generator is handed
+    # back to the caller.
+    with patch('rysy_dl.circuit_generator.find_nauty', side_effect=FileNotFoundError('missing geng')) as mock_find, \
          patch('rysy_dl.circuit_generator.subprocess.Popen') as mock_popen:
         with pytest.raises(FileNotFoundError, match='missing geng'):
             generate_nauty_digraphs(2, nauty_dir=str(tmp_path))
 
-    mock_verify.assert_called_once_with(str(tmp_path))
+    mock_find.assert_called_once_with(str(tmp_path))
     mock_popen.assert_not_called()
+
+
+def test_generate_nauty_digraphs_quotes_paths_with_spaces(tmp_path):
+    found = {'geng': '/my nauty/geng', 'directg': '/my nauty/directg'}
+    with patch('rysy_dl.circuit_generator.find_nauty', return_value=found), \
+         patch('rysy_dl.circuit_generator.subprocess.Popen', return_value=_mock_popen_proc()) as mock_popen:
+        generate_nauty_digraphs(2)
+
+    assert mock_popen.call_args.args[0][-1] == "'/my nauty/geng' 2 | '/my nauty/directg' -aTq"
 
 
 def test_generate_nauty_digraphs_passes_correct_parameters_and_yields_digraphs(tmp_path):
@@ -373,7 +461,7 @@ def test_generate_nauty_digraphs_reads_stdout_lazily(tmp_path):
 
 @pytest.mark.skipif(
     not _real_nauty_available(),
-    reason="real geng/directg binaries not found (set $NAUTY, or install to ~/nauty2_9_3)",
+    reason="real geng/directg binaries not found (set $NAUTY, or put them on PATH)",
 )
 def test_generate_nauty_digraphs_integration_with_real_geng_directg():
     """

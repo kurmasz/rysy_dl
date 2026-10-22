@@ -29,6 +29,8 @@ import copy
 import gc
 import os
 import random
+import shlex
+import shutil
 import signal
 import subprocess
 import time
@@ -47,33 +49,84 @@ from .circuit_filters import no_collapsable_children, _FORBIDDEN_CHILD_GATE
 logger = get_logger(__name__)
 
 
+# The nauty programs this module runs. Some packagers (e.g., Debian/Ubuntu's apt package) install
+# them with a "nauty-" prefix (nauty-geng, nauty-directg) to avoid name clashes in /usr/bin.
+_NAUTY_PROGRAMS = ("geng", "directg")
+_NAUTY_PREFIX = "nauty-"
+
+
 def verify_nauty(nauty_dir):
     """
     Verify that `nauty_dir` contains executable ``geng`` and ``directg`` binaries.
 
+    Each binary may use either its plain name (``geng``) or its ``nauty-`` prefixed name
+    (``nauty-geng``). The plain name is preferred when both are present.
+
     :param nauty_dir: Path to the directory expected to contain the nauty binaries.
+    :returns: A dict mapping ``"geng"`` and ``"directg"`` to the full path of each binary.
     :raises NotADirectoryError: If `nauty_dir` does not exist or is not a directory.
     :raises FileNotFoundError: If ``geng`` or ``directg`` is missing from `nauty_dir`.
     :raises PermissionError: If ``geng`` or ``directg`` exists but is not executable.
     """
     if not os.path.isdir(nauty_dir):
         raise NotADirectoryError(f"nauty directory not found: {nauty_dir}")
-    for binary in ("geng", "directg"):
-        path = os.path.join(nauty_dir, binary)
-        if not os.path.isfile(path):
-            raise FileNotFoundError(f"nauty binary not found: {path}")
-        if not os.access(path, os.X_OK):
-            raise PermissionError(f"nauty binary is not executable: {path}")
+    paths = {}
+    for program in _NAUTY_PROGRAMS:
+        candidates = [os.path.join(nauty_dir, name) for name in (program, _NAUTY_PREFIX + program)]
+        existing = [path for path in candidates if os.path.isfile(path)]
+        if not existing:
+            raise FileNotFoundError(
+                f"nauty binary not found: {candidates[0]} (also tried {candidates[1]})"
+            )
+        executable = [path for path in existing if os.access(path, os.X_OK)]
+        if not executable:
+            raise PermissionError(f"nauty binary is not executable: {existing[0]}")
+        paths[program] = executable[0]
+    return paths
+
+
+def find_nauty(nauty_dir=None):
+    """
+    Locate the ``geng`` and ``directg`` binaries.
+
+    The binaries are found as follows:
+      1. In `nauty_dir`, if given.
+      2. In the directory named by the ``NAUTY`` environment variable, if `nauty_dir` is None.
+      3. On ``PATH`` (e.g., after ``brew install nauty`` or ``apt install nauty``).
+
+    In every case, each binary may use either its plain name (``geng``) or its ``nauty-``
+    prefixed name (``nauty-geng``). An explicit `nauty_dir` or ``NAUTY`` is used as-is: if it
+    doesn't contain the binaries, the error is raised rather than falling back to ``PATH``.
+
+    :param nauty_dir: Directory containing the nauty binaries, or None to search for them.
+    :returns: A dict mapping ``"geng"`` and ``"directg"`` to the full path of each binary.
+    :raises NotADirectoryError: If the explicit/``NAUTY`` directory does not exist.
+    :raises FileNotFoundError: If a binary can't be found.
+    :raises PermissionError: If a binary exists but is not executable.
+    """
+    if nauty_dir is None:
+        nauty_dir = os.environ.get("NAUTY")
+    if nauty_dir is not None:
+        return verify_nauty(nauty_dir)
+
+    paths = {}
+    for program in _NAUTY_PROGRAMS:
+        path = shutil.which(program) or shutil.which(_NAUTY_PREFIX + program)
+        if path is None:
+            raise FileNotFoundError(
+                f"nauty binary not found: neither {program} nor {_NAUTY_PREFIX}{program} is on PATH. "
+                f"Install nauty, or set $NAUTY / --nauty-dir to the directory containing it."
+            )
+        paths[program] = path
+    return paths
 
 
 def generate_nauty_digraphs(num_nodes, nauty_dir=None):
     """
     Enumerate all non-isomorphic connected DAGs on `num_nodes` nodes using nauty.
 
-    The location of nauty is resolved as follows:
-      1. Explicitly using `nauty_dir`
-      2. Environment variable ``NAUTY``, if `nauty_dir` is None
-      3. `$HOME/nauty2_9_3` if `NAUTY` is undefined.
+    The nauty binaries are located by `find_nauty` (explicit `nauty_dir`, then ``NAUTY``,
+    then ``PATH``; plain or ``nauty-`` prefixed names).
 
 
     Runs ``geng`` to generate all undirected graphs, pipes the output
@@ -89,15 +142,14 @@ def generate_nauty_digraphs(num_nodes, nauty_dir=None):
     connected components become inputs to the final gate.
 
     :param num_nodes: Number of nodes in each generated graph.
-    :param nauty_dir: Directory containing the nauty binaries.
+    :param nauty_dir: Directory containing the nauty binaries, or None to search for them.
     :yields: Each DAG as a string in nauty's text format, one at a time.
     :raises subprocess.CalledProcessError: If the ``geng | directg`` pipeline fails.
     """
 
-    if nauty_dir is None:
-        nauty_dir = os.environ.get("NAUTY", os.path.expandvars("$HOME/nauty2_9_3"))
-
-    verify_nauty(nauty_dir)
+    nauty_paths = find_nauty(nauty_dir)
+    geng = shlex.quote(nauty_paths["geng"])
+    directg = shlex.quote(nauty_paths["directg"])
 
     # -o pipefail: Use the
     cmd = [
@@ -105,7 +157,7 @@ def generate_nauty_digraphs(num_nodes, nauty_dir=None):
         "-o",
         "pipefail",
         "-c",
-        f"{nauty_dir}/geng {num_nodes} | {nauty_dir}/directg -aTq",
+        f"{geng} {num_nodes} | {directg} -aTq",
     ]
     # start_new_session=True makes `proc` the leader of its own process group, so geng and
     # directg (bash's children, not ours) can be killed together with it via os.killpg below.
@@ -534,7 +586,7 @@ def generate_circuits(
                         Ctrl-C to quit early.
     :param output_dir: Directory where output PNG and pickle files are written.
     :param nauty_dir: Path to the directory containing the nauty binaries. Defaults
-                      to the ``NAUTY`` environment variable, or ``~/nauty2_9_3``.
+                      to the ``NAUTY`` environment variable, then ``PATH`` (see `find_nauty`).
     :param quiet: If ``True``, suppress printing the parameter values at startup.
     :param generate_image: If ``True`` (default), write each circuit's PNG image to
                            `output_dir`. If ``False``, only the pickle file is written.

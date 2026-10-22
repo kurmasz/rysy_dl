@@ -310,7 +310,7 @@ def main():
     gc_parser.add_argument('--show-graphs', action=argparse.BooleanOptionalAction, default=None, help='Show generated graphs (default: False)')
     gc_parser.add_argument('--generate-image', action=argparse.BooleanOptionalAction, default=None, help='Write a PNG image for each generated circuit (default: True)')
     gc_parser.add_argument('--output-dir', type=str, default=None, help='Directory to save generated graphs and expressions (default: temp_out)')
-    gc_parser.add_argument('--nauty-dir', type=str, default=None, help='Path to directory containing nauty binaries. Defaults to $NAUTY env var or ~/nauty2_9_3')
+    gc_parser.add_argument('--nauty-dir', type=str, default=None, help='Path to directory containing nauty binaries. Defaults to $NAUTY env var, then PATH (geng/directg or nauty-geng/nauty-directg)')
     gc_parser.add_argument('--if-exists', type=str, default=None, choices=['insert', 'overwrite'],
                             help='What to do if db_name already exists: (i)nsert into it or (o)verwrite it. '
                                  'If not given, you will be prompted interactively.')
