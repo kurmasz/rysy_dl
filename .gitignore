@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Environments
+venv/
+.venv/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# rysy_dl working output
+temp_out*
+
+# Databases other than the packaged default
+src/rysy_dl/db/*.sqlite
+!src/rysy_dl/db/rysy_dag_only_4-7.sqlite
+
+# Editors / OS
+*~
+\#*
+.DS_Store
+.vscode/

@@ -1,0 +1,16 @@
+{
+  "area": 43.86042604166667,
+  "circuits": 300,
+  "collision_free_pct": 93.0,
+  "collisions": 0.07,
+  "crossing_free_pct": 1.0,
+  "crossings": 3.9366666666666665,
+  "crowded_junctions": 1.7566666666666666,
+  "failures": 0,
+  "height": 2.890616666666667,
+  "jogs": 16.093333333333334,
+  "straight_wire_pct": 15.127173136461062,
+  "width": 15.272666666666668,
+  "wire_length": 37.72059166666668,
+  "worst_wire_jogs": 2.263333333333333
+}

@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rysy_dl"
+version = "0.1.0"
+description = "Generate digital logic circuit exercises, designed for use in PrairieLearn."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Zachary Kurmas" },
+    { name = "Andrew Kurmas" },
+]
+keywords = ["digital logic", "circuits", "boolean algebra", "education", "PrairieLearn"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Education",
+    "Programming Language :: Python :: 3",
+    "Topic :: Education",
+    "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+]
+dependencies = [
+    "cairosvg",
+    "matplotlib",
+    "networkx",
+    "Pillow",
+    "schemdraw",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-cov"]
+dev = ["rysy_dl[test]", "build", "twine"]
+
+[project.scripts]
+rysy_dl = "rysy_dl.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# Only the default database ships in the wheel; larger databases placed in db/
+# are for local use and would exceed PyPI's file-size limit.
+"rysy_dl.db" = ["rysy_dag_only_4-7.sqlite"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
