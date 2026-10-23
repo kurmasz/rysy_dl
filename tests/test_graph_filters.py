@@ -9,8 +9,10 @@ import networkx as nx
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from rysy_dl import graph_filters
+from rysy_dl.circuit_generator import _add_single_sink, nauty_to_networkx
 from rysy_dl.graph_filters import (
     has_shared_internal_node,
+    nauty_in_degrees_in_range,
     non_sink_out_degrees_in_range,
     non_source_in_degrees_in_range,
     num_sources_in_range,
@@ -448,3 +450,58 @@ def test_only_leaves_shared_non_source_sharing_is_false():
 
     assert only_leaves_shared(graph) is False
 
+
+# ── test nauty_in_degrees_in_range ────────────────────────────────────────────────────────────────────
+
+# nauty_in_degrees_in_range takes one line of nauty's directg -aTq output
+# ("num_vertices num_edges u1 v1 u2 v2 ...") and must account for the sink that
+# _add_single_sink adds afterward (fed by every node with out_degree 0).
+
+
+def test_nauty_in_degrees_in_range_all_gates_within_range():
+    # 0 -> 2, 1 -> 2: node 2 has fan-in 2 and is the only original sink, so
+    # the added sink has fan-in 1.
+    assert nauty_in_degrees_in_range("3 2 0 2 1 2", 1, 2) is True
+
+
+def test_nauty_in_degrees_in_range_gate_below_min():
+    # 0 -> 1 gives node 1 fan-in 1. Nodes 1 and 2 are sinks, so the added sink has fan-in 2.
+    assert nauty_in_degrees_in_range("3 1 0 1", 2, 6) is False
+
+
+def test_nauty_in_degrees_in_range_gate_above_max():
+    # Node 3 has fan-in 3.
+    assert nauty_in_degrees_in_range("4 3 0 3 1 3 2 3", 1, 2) is False
+
+
+def test_nauty_in_degrees_in_range_sources_are_ignored():
+    # Nodes 0 and 1 have fan-in 0, which is below min but they are sources.
+    # Node 2 and the added sink are the only gates.
+    assert nauty_in_degrees_in_range("4 2 0 2 1 2", 2, 2) is True
+
+
+def test_nauty_in_degrees_in_range_single_original_sink_rejected():
+    # Node 2 is the only original sink, so the added sink would have fan-in 1.
+    assert nauty_in_degrees_in_range("3 2 0 2 1 2", 2, 6) is False
+
+
+def test_nauty_in_degrees_in_range_isolated_nodes_feed_added_sink():
+    # No edges: all 3 nodes are sources with out_degree 0, so the added sink has fan-in 3.
+    assert nauty_in_degrees_in_range("3 0", 3, 3) is True
+    assert nauty_in_degrees_in_range("3 0", 2, 2) is False
+
+
+def test_nauty_in_degrees_in_range_matches_networkx_filter_exhaustively():
+    # Every DAG on 5 labeled nodes whose edges all go from lower to higher label
+    # (every subset of the 10 possible i -> j edges with i < j), checked against
+    # the networkx filter applied after _add_single_sink.
+    num_nodes = 5
+    possible_edges = [(i, j) for i in range(num_nodes) for j in range(i + 1, num_nodes)]
+    ranges = [(1, 1), (1, 6), (2, 2), (2, 3), (2, 6), (3, 5)]
+    for mask in range(1 << len(possible_edges)):
+        edges = [edge for bit, edge in enumerate(possible_edges) if mask >> bit & 1]
+        line = " ".join(map(str, [num_nodes, len(edges)] + [n for edge in edges for n in edge]))
+        graph = _add_single_sink(nauty_to_networkx(line))
+        for min_num, max_num in ranges:
+            expected = non_source_in_degrees_in_range(graph, min_num, max_num)
+            assert nauty_in_degrees_in_range(line, min_num, max_num) is expected, (line, min_num, max_num)

@@ -145,9 +145,11 @@ def test_apply_config_file_fills_from_file_when_cli_unset(tmp_path):
 
 
 def test_apply_config_file_falls_back_to_hardcoded_defaults(tmp_path):
-    args = make_args(db_name='foo.db')  # no --config at all
+    # Called the way cmd_generate_circuits calls it: db_name is an ordinary (optional) default,
+    # not a required positional, so it too falls back to its default when left unset.
+    args = make_args()  # no --config, nothing set on the command line
 
-    cli.apply_config_file(args, cli.GENERATE_CIRCUITS_DEFAULTS, cli.GENERATE_CIRCUITS_TYPES, positional=('db_name',))
+    cli.apply_config_file(args, cli.GENERATE_CIRCUITS_DEFAULTS, cli.GENERATE_CIRCUITS_TYPES)
 
     for name, default in cli.GENERATE_CIRCUITS_DEFAULTS.items():
         assert getattr(args, name) == default

@@ -1,26 +1,40 @@
 # Rysy_dl
 
-This library supports the creation and use of combinatorial circuits used for "ask-me-another" exercises. It includes:
+This Python library supports the creation and use of combinatorial circuits used for "ask-me-another" exercises.[^ask-me-another] It includes:
 
-* A command-line tool for generating a database of graphs or circuits.
-* A Python library that tools like PrairieLearn can use to build questions.
+* A command-line tool for generating a database of circuits
+* filters to remove unsuitable circuits from consideration for use in exercises
+* functions to randomly modify a circuit
+* functions to generate a circuit's diagram, Boolean expression and/or truth table
 
-Generating random circuits and graphs uniformly (i.e., in a way that gives all circuits/graphs an equal probability of 
-being generated) is difficult. Furthermore, many randomly generated circuits make for poor exercises. `rysy_dl` breaks 
-exercise generation into two phases:
+It is difficult to randomly generate circuits that are suitable for practice problems. Simple generation 
+techniques tend to overs-ample certain underlying structures. Such techniques also tend to produce "dumb"
+circuits (e.g., a circuit with an AND gate that has both X and X' as inputs).
 
-* An _enumeration_ phase that builds a database of all directed acyclic graphs (DAG) on which reasonable circuits can be built. 
-* A _gate assignment_ phase where gates are randomly assigned to the inner nodes of a DAG randomly selected from the database.
+At a high level, our approach is to generate many circuits and filter the bad ones out. The challenge 
+is to find a balance between 
+   * The size of the circuit database and
+   * The amount of work to be done "live" when generating a new exercise for a student.
 
-The number of possible DAGs (and, by extension, the number of possible circuits) grows very quickly. However, the number of DAGs 
-suitable for use in creating combinatorial circuits exercises is manageable. The number of circuits is not. Therefore, our approach
-is to build a database of DAGs offline, which is then made available to the exercise generator (e.g., PrairieLearn). The exercise
-generator then chooses a DAG at random from the database, randomly assigns gates to the DAG, then verifies that the resulting 
-circuit makes for a good exercise. Splitting the process into two phases like this keeps the run-time exercise generation (e.g., the time needed 
-for PrairieLearn to generate an exercise when a student opens an assessment) reasonable while also keeping the size of the database reasonable.
+The number of possible circuits grows exponentially. It is not possible to enumerate them all, 
+much less store all of the good ones inside a content tool like PrairieLearn.  
+At the same time, the process of repeatedly generating 
+random circuits until one is judged to be good is too time and resource intensive to be done 
+in real time as students work through an assignment. 
+
+`rysy_dl` balances these two concerns by breaking circuit generation into two phases:
+
+* An offline _enumeration_ phase that builds a database containing one example circuit for each possible underlying graph. 
+* A _gate assignment_ phase where gates are randomly assigned to a circuit randomly selected from the database.
+
+By starting with a circuit in the database, we know we have a suitable base (e.g., a circuit with a reasonable number of
+sources, and where all the gates have a reasonable fan-in and fan-out). The gate assignment is done "live" when the student 
+opens an assessment; but, the expected number of random gate assignments generated before finding one that produces a "good" circuit is small.  
+In addition, the process of (approximately) producing a uniform distribution of gate assignments is much more straightforward than the process
+of randomly producing a random circuit structure (i.e., the underlying DAG) with a uniform distribution.
 
 ## Terms
-  * _graph_ / _digraph_: The raw graph that underlies a circuit. No gates have been assigned to nodes.
+  * _graph_ / _digraph_: The raw directed acyclic graph (DAG) that underlies a circuit. No gates have been assigned to nodes.
   * _netlist_: A `networkx` graph object with sources and gates assigned to nodes.
   * _circuit_: An instance of the `Circuit` class. The `Circuit` class is a "thin" class that 
     delegates to functions in various circuit-related modules. Tools like PrairieLearn will primarily interact
@@ -39,8 +53,8 @@ This installs the `rysy_dl` library along with the `rysy_dl` command-line tool.
 
 ### `nauty`
 
-The circuit generator uses an external tool called [`nauty`](https://pallini.di.uniroma1.it/) to enumerate the underlying DAGs. You must 
-install `nauty` in order to build your own database of graphs. (You don't need it just to use a previously-created database.)
+The circuit generator ensures a uniform distribution of circuit structures by using an external tool called [`nauty`](https://pallini.di.uniroma1.it/) 
+to enumerate the underlying DAGs. You must  install `nauty` in order to build your own database of graphs. (You don't need it just to use a previously-created database.)
 
 * **macOS:** `brew install nauty`
 * **Debian/Ubuntu:** `sudo apt install nauty` (this installs the programs as `nauty-geng` and `nauty-directg`; `rysy_dl` finds either name)
@@ -83,3 +97,6 @@ to the build directory (e.g., `export NAUTY=$HOME/nauty2_9_3`), pass `--nauty-di
 ## License
 
 MIT -- see [LICENSE](LICENSE).
+
+[^ask-me-another]: An "ask-me-another" exercise is a practice question that students can repeat as often as they like, 
+    getting a new, randomly generated variant (here, a different circuit) each time.

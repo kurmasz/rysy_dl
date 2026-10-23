@@ -15,12 +15,13 @@ Notes:
 
 Common workflow:
     * `generate_circuits`
-       * `generate_nauty_digraphs` (calls nauty's `geng | directg`)
-       * `nauty_to_networkx` (convert nauty's text format to a networkx DiGraph)
-       * `_add_single_sink` (add a single sink node to the graph)
-       * Apply filters to remove graphs that won't make good circuits (e.g., too many/few sources)
-       * Assign gates to the graphs (when are then called netlists)
-       * Add netlist to db.
+    * `generate_nauty_digraphs` (calls nauty's `geng | directg`)
+    * `nauty_in_degrees_in_range` (cheaply reject DAGs with out-of-range fan-in before building a networkx DiGraph)
+    * `nauty_to_networkx` (convert nauty's text format to a networkx DiGraph)
+    * `_add_single_sink` (add a single sink node to the graph)
+    * Apply filters to remove DAGs that won't make good circuits (e.g., too many/few sources)
+    * Assign gates to the graphs (when are then called netlists)
+    * Add netlist to db.
 
 :copyright: 2026, Zachary and Andrew Kurmas
 """
@@ -40,6 +41,7 @@ from itertools import product
 from .logging_config import get_logger
 from .graph_analyzers import num_sources_and_gates
 from .graph_filters import (
+    nauty_in_degrees_in_range,
     num_sources_in_range,
     non_source_in_degrees_in_range,
     non_sink_out_degrees_in_range,
@@ -72,7 +74,9 @@ def verify_nauty(nauty_dir):
         raise NotADirectoryError(f"nauty directory not found: {nauty_dir}")
     paths = {}
     for program in _NAUTY_PROGRAMS:
-        candidates = [os.path.join(nauty_dir, name) for name in (program, _NAUTY_PREFIX + program)]
+        candidates = [
+            os.path.join(nauty_dir, name) for name in (program, _NAUTY_PREFIX + program)
+        ]
         existing = [path for path in candidates if os.path.isfile(path)]
         if not existing:
             raise FileNotFoundError(
@@ -329,7 +333,11 @@ def assign_gates_randomly_ensure_diversity(graph, include_xnor=False):
     # graph in node order and hand them out, marking source nodes as 'src'
     chosen_iter = iter(chosen_gates)
     attrs = {
-        node: {"gate": "src"} if graph.in_degree(node) == 0 else {"gate": next(chosen_iter)}
+        node: (
+            {"gate": "src"}
+            if graph.in_degree(node) == 0
+            else {"gate": next(chosen_iter)}
+        )
         for node in range(len(graph))
     }
 
@@ -360,6 +368,7 @@ def assign_gates_randomly_ensure_diversity(graph, include_xnor=False):
 
     nx.set_node_attributes(graph, attrs)
 
+
 def assign_gates_randomly(netlist, ensure_diversity=True, gate_list=None):
     if ensure_diversity:
         assign_gates_randomly_ensure_diversity(netlist)
@@ -386,11 +395,14 @@ def assign_gates_randomly(netlist, ensure_diversity=True, gate_list=None):
             # empty if gate_list is XOR/XNOR only)
             gates_list.append(0)
         else:
-            candidates = full_indices if netlist.in_degree(node) == 2 else restricted_indices
+            candidates = (
+                full_indices if netlist.in_degree(node) == 2 else restricted_indices
+            )
             gates_list.append(random.choice(candidates))
     gates_tuple = tuple(gates_list)
     # passing tuple to node_gate_assigner
     _apply_gate_assignment(netlist, gates_tuple, gate_list)
+
 
 def all_gate_assignment(
     graph, filter_list=(), gate_list=("AND", "OR", "XOR", "NAND", "NOR")
@@ -454,28 +466,26 @@ def all_gate_assignment(
                 yield copy.deepcopy(graph)
 
 
-
 # ── Adding NOT gates ────────────────────────────────────────────────────────────────
 
 
 def _not_node_inserter(netlist, source_node, sequence):
     """
-    Inserts a NOT gate between source_node and the set of successors for which 
+    Inserts a NOT gate between source_node and the set of successors for which
     corresponding value in _sequence_ is True.
-    
+
     Note that at most 1 NOT gate is added.
     """
-        
+
     # Return without adding a NOT gates if _sequence_ contains 0 only.
     if not any(sequence):
         return
-    
+
     # Create a new node, add it to the netlist and make this new node a NOT gate.
     not_node = len(netlist)
     netlist.add_node(not_node)
     netlist.nodes[not_node]["gate"] = "NOT"
-    
-    
+
     # Routes wires through NOT gate according to value in _sequence_
     for index, successor in enumerate(list(netlist.successors(source_node))):
         # Routes through not gate if matching index in 'sequence' is True
@@ -524,14 +534,43 @@ def insert_random_source_edge_nots(netlist):
             _not_node_inserter(netlist, node, not_tuple)
 
 
-
-
 def filter_helper(graph, filter_list):
     # logic for going through all gate filters
     for filter in filter_list:
         if not filter(graph):
             return False
     return True
+
+
+class CountingFilter:
+    """
+    Wraps a graph predicate and counts how many graphs it evaluates and rejects.
+
+    When these are chained with `filter`, each one only sees the graphs that passed the
+    filters before it, so the counts show how many graphs each step removes.
+    """
+
+    def __init__(self, name, predicate):
+        self.name = name
+        self.predicate = predicate
+        self.evaluated = 0
+        self.rejected = 0
+
+    def __call__(self, graph):
+        self.evaluated += 1
+        passed = self.predicate(graph)
+        if not passed:
+            self.rejected += 1
+        return passed
+
+    def __str__(self):
+        return f"{self.name}: {self.rejected}/{self.evaluated} rejected"
+
+
+def _print_filter_stats(filters):
+    print("Filter stats:")
+    for f in filters:
+        print(f"  {f}")
 
 
 # ── generate_circuits ────────────────────────────────────────────────────────────────
@@ -603,22 +642,40 @@ def generate_circuits(
             f"nauty_dir={nauty_dir}, quiet={quiet}"
         )
 
-    initial_networkx_dags_iter = map(
-        nauty_to_networkx, generate_nauty_digraphs(dag_size, nauty_dir=nauty_dir)
+    # Building a networkx DiGraph is the most expensive step per DAG, and most DAGs are rejected
+    # for having a gate with out-of-range fan-in. So check fan-in on nauty's raw text first, and
+    # only build DiGraphs for the DAGs that pass.
+    nauty_fan_in_filter = CountingFilter(
+        "nauty_fan_in",
+        lambda line: nauty_in_degrees_in_range(line, min_num_inputs, max_num_inputs),
     )
-    
+    fan_in_ok_nauty_dags_iter = filter(
+        nauty_fan_in_filter, generate_nauty_digraphs(dag_size, nauty_dir=nauty_dir)
+    )
+    initial_networkx_dags_iter = map(nauty_to_networkx, fan_in_ok_nauty_dags_iter)
+
     # If the initial dag has only one sink, then this operation creates a graph
-    # where the new sink has only input.  This graph is then filtered out by 
+    # where the new sink has only input.  This graph is then filtered out by
     # the non_sink_out_degrees_in_range
     networkx_dags_iter = map(_add_single_sink, initial_networkx_dags_iter)
 
     filters = [
         # Require a range of input counts for the resulting circuits.
-        lambda g: num_sources_in_range(g, min_num_source, max_num_source),
-        # Require each gate's fan-in to be within the specified range
-        lambda g: non_source_in_degrees_in_range(g, min_num_inputs, max_num_inputs),
+        CountingFilter(
+            "num_sources",
+            lambda g: num_sources_in_range(g, min_num_source, max_num_source),
+        ),
+        # Require each gate's fan-in to be within the specified range. (nauty_fan_in_filter already
+        # enforced this on the raw nauty text; re-checking the few surviving DiGraphs is cheap.)
+        CountingFilter(
+            "fan_in",
+            lambda g: non_source_in_degrees_in_range(g, min_num_inputs, max_num_inputs),
+        ),
         # Require each gate's fan-out to be within the specified range
-        lambda g: non_sink_out_degrees_in_range(g, min_num_outputs, max_num_outputs),
+        CountingFilter(
+            "fan_out",
+            lambda g: non_sink_out_degrees_in_range(g, min_num_outputs, max_num_outputs),
+        ),
     ]
 
     filtered_dags_iter = networkx_dags_iter
@@ -665,9 +722,10 @@ def generate_circuits(
                 #  show_netlist returns True if the user pressed 'q' to quit early, False otherwise.
                 if circuit_generator_display.show_netlist(netlist, raw_digraph):
                     print(" .")
+                    _print_filter_stats([nauty_fan_in_filter] + filters)
                     return n
 
-            if n % 10000 == 0:
+            if n % 100000 == 0:
                 now = time.monotonic()
                 print(
                     f"Processed {n} graphs ({now - last_status_time:.1f}s since last update)"
@@ -676,4 +734,5 @@ def generate_circuits(
                 gc.collect()
 
     print(f"Generated {n} circuits ...")
+    _print_filter_stats([nauty_fan_in_filter] + filters)
     return n

@@ -28,6 +28,38 @@ def non_source_in_degrees_in_range(graph, min_num: int, max_num:int):
                 return False
     return True
 
+def nauty_in_degrees_in_range(nauty_graph: str, min_num: int, max_num: int):
+    """
+    The same check as `non_source_in_degrees_in_range`, but applied to one line of nauty's
+    ``directg -aTq`` output (``num_vertices num_edges u1 v1 u2 v2 ...``) before it is converted
+    to a networkx DiGraph.
+
+    Building the networkx DiGraph is the most expensive step in generating circuits, and most
+    DAGs nauty produces are rejected because some gate's fan-in is out of range. Checking fan-in
+    on the raw edge list rejects those DAGs without building a graph for them.
+
+    The check accounts for the sink that `circuit_generator._add_single_sink` will add: that
+    sink's fan-in is the number of nodes with out_degree 0 in the nauty DAG. So for any line,
+    this returns the same result as
+    ``non_source_in_degrees_in_range(_add_single_sink(nauty_to_networkx(line)), min_num, max_num)``.
+    """
+    parts = list(map(int, nauty_graph.split()))
+    num_nodes = parts[0]
+    in_degrees = [0] * num_nodes
+    has_out_edge = [False] * num_nodes
+    # parts[2:] holds the edges as u v pairs: u's are at even offsets, v's at odd offsets.
+    for u in parts[2::2]:
+        has_out_edge[u] = True
+    for v in parts[3::2]:
+        in_degrees[v] += 1
+
+    for in_degree in in_degrees:
+        if in_degree != 0 and (in_degree > max_num or in_degree < min_num):
+            return False
+
+    sink_in_degree = has_out_edge.count(False)
+    return min_num <= sink_in_degree <= max_num
+
 def non_sink_out_degrees_in_range(graph, min_num: int, max_num:int):
     """
     Verifies that the out-degree of all non-sinknodes falls in within the desired range.

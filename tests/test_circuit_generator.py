@@ -1751,13 +1751,13 @@ def test_generate_circuits_display_continues_when_show_netlist_does_not_quit(mon
     assert mock_display.show_netlist.call_count == 3
 
 
-def test_generate_circuits_prints_status_and_collects_garbage_every_10000(capsys):
+def test_generate_circuits_prints_status_and_collects_garbage_every_100000(capsys):
     db = _RecordingDB()
-    lines = ["1 0"] * 10000
+    lines = ["1 0"] * 100000
 
     with patch('rysy_dl.circuit_generator.gc.collect') as mock_gc_collect:
         result = _run_generate_circuits(lines, db, gate_assignment='and-only', quiet=True)
 
-    assert result == 10000
+    assert result == 100000
     assert mock_gc_collect.call_count == 1
-    assert "Processed 10000 graphs" in capsys.readouterr().out
+    assert "Processed 100000 graphs" in capsys.readouterr().out
