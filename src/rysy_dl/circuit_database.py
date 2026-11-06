@@ -12,7 +12,7 @@ Schema:
   max_gate_outdegree: int
   max_input_outdegree: int
   gate_type_mask: integer bitmask
-  has_shared_subexpressions: boolean (0/1)
+  max_shared_subcircuit_depth: int (0 if no gate output is shared; see graph_filters.max_shared_subcircuit_depth)
   graph: blob
 """
 
@@ -23,7 +23,7 @@ from typing import Callable, ClassVar, Optional, TYPE_CHECKING
 
 import networkx as nx
 
-from .graph_filters import has_shared_internal_node
+from . import graph_filters
 
 from .graph_analyzers import num_sources_and_gates
 from .circuit_serialization import circuit_to_serializable, serializable_to_circuit
@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     max_gate_outdegree  INTEGER NOT NULL,
     max_input_outdegree INTEGER NOT NULL,
     gate_type_mask      INTEGER NOT NULL,
-    has_shared_subexpressions INTEGER NOT NULL,
+    max_shared_subcircuit_depth INTEGER NOT NULL,
     graph               BLOB NOT NULL
 )
 """
@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
 # and row_to_record (turning a row back into a dict).
 _STAT_COLUMNS = ('num_gates', 'num_inputs', 'depth', 'max_indegree',
                   'max_gate_outdegree', 'max_input_outdegree', 'gate_type_mask',
-                  'has_shared_subexpressions')
+                  'max_shared_subcircuit_depth')
 
 
 def gate_type_mask_of(graph):
@@ -92,7 +92,7 @@ def circuit_stats(graph):
 
     :param graph: A networkx DiGraph representing a circuit, as produced by `circuit_generator`.
     :returns: A dict keyed by column name: num_gates, num_inputs, depth, max_indegree,
-              max_gate_outdegree, max_input_outdegree, gate_type_mask, has_shared_subexpressions.
+              max_gate_outdegree, max_input_outdegree, gate_type_mask, max_shared_subcircuit_depth.
     """
     num_sources, num_gates, _not_gates = num_sources_and_gates(graph)
 
@@ -107,7 +107,7 @@ def circuit_stats(graph):
         'max_gate_outdegree': max(gate_outdegrees, default=0),
         'max_input_outdegree': max(input_outdegrees, default=0),
         'gate_type_mask': gate_type_mask_of(graph),
-        'has_shared_subexpressions': has_shared_internal_node(graph),
+        'max_shared_subcircuit_depth': graph_filters.max_shared_subcircuit_depth(graph),
     }
 
 
@@ -148,7 +148,7 @@ def row_to_record(row):
 
     :param row: A row from the `circuits` table, with column access by name (e.g. `row['graph']`).
     :returns: A dict with keys id, num_gates, num_inputs, depth, max_indegree, max_gate_outdegree,
-              max_input_outdegree, gate_type_mask, has_shared_subexpressions, and graph (a networkx DiGraph).
+              max_input_outdegree, gate_type_mask, max_shared_subcircuit_depth, and graph (a networkx DiGraph).
     """
     record = {col: row[col] for col in ('id',) + _STAT_COLUMNS}
     record['graph'] = serializable_to_circuit(pickle.loads(row['graph']))
@@ -330,7 +330,7 @@ class CircuitDatabase:
 
     def iterate_entries(self, *, num_gates=None, num_inputs=None, depth=None,
                         max_indegree=None, max_gate_outdegree=None, max_input_outdegree=None,
-                        gate_type_mask=None, has_shared_subexpressions=None):
+                        gate_type_mask=None, max_shared_subcircuit_depth=None):
         """
         Iterate over the circuits that match the given filters, one row at a time, ordered by `id`.
 
@@ -342,13 +342,13 @@ class CircuitDatabase:
         where, params = stat_filter_where(
             num_gates=num_gates, num_inputs=num_inputs, depth=depth, max_indegree=max_indegree,
             max_gate_outdegree=max_gate_outdegree, max_input_outdegree=max_input_outdegree,
-            gate_type_mask=gate_type_mask, has_shared_subexpressions=has_shared_subexpressions,
+            gate_type_mask=gate_type_mask, max_shared_subcircuit_depth=max_shared_subcircuit_depth,
         )
         return self.iterate(where, params)
 
     def get_random_entry(self, *, num_gates=None, num_inputs=(1, 4), depth=None,
                           max_indegree=None, max_gate_outdegree=None, max_input_outdegree=None,
-                          gate_type_mask=None, has_shared_subexpressions=None, allow_empty_result=False):
+                          gate_type_mask=None, max_shared_subcircuit_depth=None, allow_empty_result=False):
         """
         Fetch a single circuit chosen uniformly at random, optionally filtered.
 
@@ -361,7 +361,7 @@ class CircuitDatabase:
         where, params = stat_filter_where(
             num_gates=num_gates, num_inputs=num_inputs, depth=depth, max_indegree=max_indegree,
             max_gate_outdegree=max_gate_outdegree, max_input_outdegree=max_input_outdegree,
-            gate_type_mask=gate_type_mask, has_shared_subexpressions=has_shared_subexpressions,
+            gate_type_mask=gate_type_mask, max_shared_subcircuit_depth=max_shared_subcircuit_depth,
         )
 
         sql = f"SELECT * FROM {TABLE_NAME}"

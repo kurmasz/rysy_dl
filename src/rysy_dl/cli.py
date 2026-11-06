@@ -46,6 +46,7 @@ GENERATE_CIRCUITS_DEFAULTS = {
     'min_fan_out': 1,
     'max_fan_out': 5,
     'gate_assignment': 'random',
+    'not_gates': 'none',
     'show_graphs': False,
     'output_dir': 'temp_out',
     'nauty_dir': None,
@@ -56,6 +57,7 @@ GENERATE_CIRCUITS_DEFAULTS = {
 
 GENERATE_CIRCUITS_CHOICES = {
     'gate_assignment': ['random', 'all', 'and-only'],
+    'not_gates': ['none', 'random', 'all'],
 }
 
 GENERATE_CIRCUITS_TYPES = {
@@ -67,6 +69,7 @@ GENERATE_CIRCUITS_TYPES = {
     'min_fan_out': int,
     'max_fan_out': int,
     'gate_assignment': str,
+    'not_gates': str,
     'show_graphs': bool,
     'output_dir': str,
     'nauty_dir': str,
@@ -189,6 +192,7 @@ def cmd_generate_circuits(args):
                 min_num_outputs=args.min_fan_out,
                 max_num_outputs=args.max_fan_out,
                 gate_assignment=args.gate_assignment,
+                not_gates=args.not_gates,
                 display_circuits=args.show_graphs,
                 output_dir=args.output_dir,
                 nauty_dir=args.nauty_dir,
@@ -214,7 +218,8 @@ def cmd_generate_circuits(args):
                 ).strip().lower()[:1]
             if answer == 'q':
                 print("Quitting: database already exists and user chose not to proceed.")
-                return
+                # Exit non-zero so scripts that run several generate-circuits commands can stop.
+                sys.exit(1)
         if answer == 'o':
             os.remove(args.db_name)
             circuit_database.create(args.db_name)
@@ -233,6 +238,7 @@ def cmd_generate_circuits(args):
                 min_num_outputs=args.min_fan_out,
                 max_num_outputs=args.max_fan_out,
                 gate_assignment=args.gate_assignment,
+                not_gates=args.not_gates,
                 display_circuits=args.show_graphs,
                 output_dir=args.output_dir,
                 nauty_dir=args.nauty_dir,
@@ -259,7 +265,6 @@ def cmd_layout(args):
 
 # view-circuits options that restrict which circuits are shown: one per keyword of
 # CircuitDatabase.get_random_entry / iterate_entries, mapped to its --help description.
-# (has_shared_subexpressions is a yes/no option, so it is added separately.)
 VIEW_CIRCUITS_FILTERS = {
     'num_gates': 'number of gates (non-input nodes, including NOT gates)',
     'num_inputs': 'number of input variables',
@@ -268,6 +273,7 @@ VIEW_CIRCUITS_FILTERS = {
     'max_gate_outdegree': 'largest fan-out of any gate',
     'max_input_outdegree': 'largest fan-out of any input variable',
     'gate_type_mask': 'gate_type_mask bitmask (see circuit_database.GATE_BITS)',
+    'max_shared_subcircuit_depth': 'depth of the deepest gate whose output feeds more than one gate (0 if none)',
 }
 
 
@@ -282,7 +288,6 @@ def _int_or_range(text):
 
 def cmd_view_circuits(args):
     filters = {name: getattr(args, name) for name in VIEW_CIRCUITS_FILTERS}
-    filters['has_shared_subexpressions'] = args.has_shared_subexpressions
     if args.id is not None and any(value is not None for value in filters.values()):
         print("Error: --id can't be combined with filter options", file=sys.stderr)
         sys.exit(1)
@@ -344,6 +349,9 @@ def main():
     gc_parser.add_argument('--min-fan-out', type=int, default=None, help='Minimum number of outputs for each gate (default: 1)')
     gc_parser.add_argument('--max-fan-out', type=int, default=None, help='Maximum number of outputs for each gate (default: 5)')
     gc_parser.add_argument('--gate-assignment', type=str, default=None, choices=['random', 'all', 'and-only'], help='Gate assignment method: random or all (default: random)')
+    gc_parser.add_argument('--not-gates', type=str, default=None, choices=['none', 'random', 'all'],
+                            help='NOT gates on edges leaving the inputs: none, random (randomly insert them), '
+                                 'or all (not implemented yet) (default: none)')
     gc_parser.add_argument('--show-graphs', action=argparse.BooleanOptionalAction, default=None, help='Show generated graphs (default: False)')
     gc_parser.add_argument('--generate-image', action=argparse.BooleanOptionalAction, default=None, help='Write a PNG image for each generated circuit (default: True)')
     gc_parser.add_argument('--output-dir', type=str, default=None, help='Directory to save generated graphs and expressions (default: temp_out)')
@@ -375,10 +383,6 @@ def main():
                                            metavar='N|MIN-MAX',
                                            help=f'Only display circuits whose {description} is N, '
                                                 f'or between MIN and MAX inclusive.')
-    view_circuits_parser.add_argument('--has-shared-subexpressions', action=argparse.BooleanOptionalAction,
-                                       default=None,
-                                       help='Only display circuits that do (or, with --no-has-shared-subexpressions, '
-                                            'do not) have a gate whose output feeds more than one other gate.')
     view_circuits_parser.set_defaults(func=cmd_view_circuits)
 
     args = parser.parse_args()

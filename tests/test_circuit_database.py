@@ -83,10 +83,10 @@ def test_iterate_entries_range_is_inclusive(db):
     assert [entry['num_inputs'] for entry in db.iterate_entries(num_inputs=(3, 4))] == [3, 4]
 
 
-def test_iterate_entries_boolean_filter(db):
+def test_iterate_entries_shared_subcircuit_depth_filter(db):
     # AND trees never share an internal node.
-    assert list(db.iterate_entries(has_shared_subexpressions=True)) == []
-    assert len(list(db.iterate_entries(has_shared_subexpressions=False))) == 4
+    assert list(db.iterate_entries(max_shared_subcircuit_depth=(1, 99))) == []
+    assert len(list(db.iterate_entries(max_shared_subcircuit_depth=0))) == 4
 
 
 def test_iterate_entries_no_match(db):
@@ -107,3 +107,15 @@ def test_get_random_entry_no_match_raises(db):
 
 def test_get_random_entry_no_match_allowed(db):
     assert db.get_random_entry(num_inputs=9, allow_empty_result=True) is None
+
+
+# ── test circuit_stats ────────────────────────────────────────────────────────────────────
+
+def test_circuit_stats_records_max_shared_subcircuit_depth():
+    # Inputs 0, 1 -> AND 2 -> AND 3, and 3 feeds both 4 and 5, which feed the output 6.
+    graph = nx.DiGraph()
+    graph.add_nodes_from([0, 1], gate='src')
+    graph.add_nodes_from([2, 3, 4, 5, 6], gate='AND')
+    graph.add_edges_from([(0, 2), (1, 2), (2, 3), (0, 3), (3, 4), (3, 5), (1, 4), (0, 5), (4, 6), (5, 6)])
+
+    assert circuit_database.circuit_stats(graph)['max_shared_subcircuit_depth'] == 2

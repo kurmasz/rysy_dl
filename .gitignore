@@ -19,7 +19,7 @@ temp_out*
 
 # Databases other than the packaged default
 src/rysy_dl/db/*.sqlite
-!src/rysy_dl/db/rysy_dag_only_4-7.sqlite
+!src/rysy_dl/db/rysy_and_only_4-7.sqlite
 
 # Editors / OS
 *~

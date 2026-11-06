@@ -268,6 +268,7 @@ def test_cmd_generate_circuits_creates_new_db_and_calls_generate_circuits(tmp_pa
     assert calls['dag_size'] == 5
     assert calls['min_num_inputs'] == 3
     assert calls['gate_assignment'] == 'random'   # default
+    assert calls['not_gates'] == 'none'           # default
     assert calls['display_circuits'] is False     # default
     assert calls['status_interval'] == 10.0       # default
     assert isinstance(calls['db'], FakeDB)
@@ -305,8 +306,10 @@ def test_cmd_generate_circuits_quit_when_db_exists(tmp_path, monkeypatch, capsys
     monkeypatch.setattr(cli, 'generate_circuits', fail_if_called)
 
     args = make_args(db_name=str(db_path))
-    cli.cmd_generate_circuits(args)
+    with pytest.raises(SystemExit) as exc_info:
+        cli.cmd_generate_circuits(args)
 
+    assert exc_info.value.code == 1
     assert "Quitting" in capsys.readouterr().out
     assert db_path.read_bytes() == b"old contents"  # left untouched
 
@@ -471,20 +474,20 @@ def test_view_circuits_parses_filter_options(monkeypatch):
     received = []
     monkeypatch.setattr(cli, 'cmd_view_circuits', received.append)
     monkeypatch.setattr(sys, 'argv', ['rysy_dl', 'view-circuits', 'foo.db', '--num-inputs', '2-4',
-                                      '--depth', '3', '--no-has-shared-subexpressions'])
+                                      '--depth', '3', '--max-shared-subcircuit-depth', '0'])
 
     cli.main()
 
     args = received[0]
     assert args.num_inputs == (2, 4)
     assert args.depth == 3
-    assert args.has_shared_subexpressions is False
-    for name in cli.VIEW_CIRCUITS_FILTERS.keys() - {'num_inputs', 'depth'}:
+    assert args.max_shared_subcircuit_depth == 0
+    for name in cli.VIEW_CIRCUITS_FILTERS.keys() - {'num_inputs', 'depth', 'max_shared_subcircuit_depth'}:
         assert getattr(args, name) is None
 
 
 def test_view_circuits_id_with_filter_exits(capsys):
-    args = argparse.Namespace(db_name='foo.db', id=3, has_shared_subexpressions=None,
+    args = argparse.Namespace(db_name='foo.db', id=3,
                               **{name: None for name in cli.VIEW_CIRCUITS_FILTERS})
     args.num_gates = 4
 
@@ -512,7 +515,7 @@ def test_view_circuits_shows_each_matching_circuit_with_id_in_title_prefix(tmp_p
     mock_display = MagicMock()
     mock_display.show_netlist.return_value = False  # never quit early
     monkeypatch.setattr(cli, 'circuit_generator_display', mock_display)
-    args = argparse.Namespace(db_name=db_path, id=None, has_shared_subexpressions=None,
+    args = argparse.Namespace(db_name=db_path, id=None,
                               **{name: None for name in cli.VIEW_CIRCUITS_FILTERS})
     args.num_inputs = 3
 
@@ -520,3 +523,34 @@ def test_view_circuits_shows_each_matching_circuit_with_id_in_title_prefix(tmp_p
 
     title_prefixes = [call.kwargs['title_prefix'] for call in mock_display.show_netlist.call_args_list]
     assert title_prefixes == ['id=2', 'id=3']
+
+
+def test_generate_circuits_parses_not_gates_option(monkeypatch):
+    received = []
+    monkeypatch.setattr(cli, 'cmd_generate_circuits', received.append)
+    monkeypatch.setattr(sys, 'argv', ['rysy_dl', 'generate-circuits', 'foo.db', '--not-gates', 'random'])
+
+    cli.main()
+
+    assert received[0].not_gates == 'random'
+
+
+def test_cmd_generate_circuits_passes_not_gates_through(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.circuit_database, 'create', lambda p: None)
+    monkeypatch.setattr(cli.circuit_database, 'CircuitDatabase', lambda p: FakeDB())
+    calls = {}
+    monkeypatch.setattr(cli, 'generate_circuits', lambda **kw: calls.update(kw))
+
+    cli.cmd_generate_circuits(make_args(db_name=str(tmp_path / "c.db"), not_gates='random'))
+
+    assert calls['not_gates'] == 'random'
+
+
+def test_cmd_generate_circuits_rejects_invalid_not_gates_from_config(tmp_path, capsys):
+    config = tmp_path / "gen.cfg"
+    config.write_text("not_gates: sometimes\n")
+
+    with pytest.raises(SystemExit):
+        cli.cmd_generate_circuits(make_args(db_name=str(tmp_path / "c.db"), config=str(config)))
+
+    assert "'not_gates' must be one of" in capsys.readouterr().err

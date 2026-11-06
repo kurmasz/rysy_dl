@@ -4,12 +4,12 @@ This Python library supports the creation and use of combinatorial circuits used
 
 * A command-line tool for generating a database of circuits
 * filters to remove unsuitable circuits from consideration for use in exercises
-* functions to randomly modify a circuit
+* functions to randomly modify a circuit (thereby generating a new problem)
 * functions to generate a circuit's diagram, Boolean expression and/or truth table
 
 It is difficult to randomly generate circuits that are suitable for practice problems. Simple generation 
-techniques tend to overs-ample certain underlying structures. Such techniques also tend to produce "dumb"
-circuits (e.g., a circuit with an AND gate that has both X and X' as inputs).
+techniques tend to over-sample certain underlying structures. Such techniques also tend to produce "dumb"
+circuits (e.g., a circuit with an AND gate that has both `X` and `X'` as inputs).
 
 At a high level, our approach is to generate many circuits and filter the bad ones out. The challenge 
 is to find a balance between 
@@ -28,7 +28,7 @@ in real time as students work through an assignment.
 * A _gate assignment_ phase where gates are randomly assigned to a circuit randomly selected from the database.
 
 By starting with a circuit in the database, we know we have a suitable base (e.g., a circuit with a reasonable number of
-sources, and where all the gates have a reasonable fan-in and fan-out). The gate assignment is done "live" when the student 
+sources, and where all the gates have a reasonable fan-in and fan-out). Gates are assigned "live" when the student 
 opens an assessment; but, the expected number of random gate assignments generated before finding one that produces a "good" circuit is small.  
 In addition, the process of (approximately) producing a uniform distribution of gate assignments is much more straightforward than the process
 of randomly producing a random circuit structure (i.e., the underlying DAG) with a uniform distribution.
@@ -93,6 +93,79 @@ to the build directory (e.g., `export NAUTY=$HOME/nauty2_9_3`), pass `--nauty-di
 3. Check them: `python -m twine check dist/*`
 4. Upload to TestPyPI first: `python -m twine upload --repository testpypi dist/*`
 5. Upload to PyPI: `python -m twine upload dist/*`
+
+## PrairieLearn
+
+PrairieLearn Questions use `rysy_dl` from their `server.py`. PrairieLearn puts the course's `serverFilesCourse` directory on
+the Python path, so installing `rysy_dl` into `serverFilesCourse` makes the library available to all questions in the course.
+
+PrairieLearn's Python environment already includes `rysy_dl`'s runtime dependencies (`networkx`, `matplotlib`,
+`schemdraw`, and `Pillow`), so only `rysy_dl` itself must be installed (`--no-deps`). (`cairosvg` is used only by a
+debugging tool and isn't needed in PrairieLearn.)
+
+The precise installation method depends on whether the user is modifying `rysy_dl`, or simply using the published package.
+
+All of the options below require [Docker](https://www.docker.com/). They run commands inside the
+`prairielearn/prairielearn` image so that the result matches the environment questions run in.
+
+### Installing a release from PyPI
+
+For users who do not intend to modify `rysy_dl`, simply run
+
+```
+docker run --rm -v /path/to/course:/course prairielearn/prairielearn \
+  uv pip install --target /course/serverFilesCourse --no-deps rysy_dl==<version>
+```
+
+then commit `serverFilesCourse/rysy_dl` and `serverFilesCourse/rysy_dl-<version>.dist-info`.
+(`serverFilesCourse/bin/rysy_dl` and `serverFilesCourse/.lock` are not needed and can be deleted.)  `/path/to/course` is the absolute path name of the cloned git repo for the course in question.
+
+To update, first delete `serverFilesCourse/rysy_dl` and `serverFilesCourse/rysy_dl-*.dist-info`, then run the docker
+command again with the new version. (`uv` does not remove files that the new version no longer contains.)
+
+If you have a copy of this repository, `scripts/pl_course.sh` does all of this for you:
+
+```
+scripts/pl_course.sh install /path/to/course rysy_dl==<version>
+```
+
+### Installing from source (e.g., a fork)
+
+If you have cloned this repository and want to install from source into a course, 
+run this command from the repository's root:
+
+```
+scripts/pl_course.sh install /path/to/course .
+```
+
+This builds a package from the clone (exactly as it would be built for PyPI) and installs it the same way
+as a release, replacing any previous copy in the course. Note that it builds from the files in the
+clone, including uncommitted changes. The source may also be a git URL, e.g.,
+`git+https://github.com/<you>/rysy_dl.git@<tag>`.
+
+### Testing a development copy with a local PrairieLearn
+
+If you are developing `rysy_dl` and want to run it in "editable" mode together a local instance of PrairieLearn, run
+
+```
+scripts/pl_course.sh dev /path/to/course
+```
+
+This command launches the docker command to run PrairieLearn locally.  (See https://docs.prairielearn.com/installing/#running-instructions for details.)
+
+When launching the docker container, the `pl_course` script mounts `src/rysy_dl` over the course's `serverFilesCourse/rysy_dl`,
+hiding any "installed" copy and using your "live" copy instead. If the course doesn't have
+`serverFilesCourse/rysy_dl`, Docker creates an empty directory there as a mount point; don't commit it.
+If your changes don't show up, restart the container.
+
+Note: `pl_course.sh` does not handle advanced configurations such as multiple courses, external graders, or workspaces. To use
+those features in dev mode, add  `-v path_to_rysy_dl/src/rysy_dl:/course/serverFilesCourse/rysy_dl` to your launch script.
+
+Using source directly rather than a built package, won't catch packaging mistakes
+(e.g., a file missing from `[tool.setuptools.package-data]`). Before releasing, install into a test course
+with `scripts/pl_course.sh install` at least once.
+
+On Linux, files created by Docker in the course directory may be owned by `root`.
 
 ## License
 

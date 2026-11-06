@@ -607,6 +607,7 @@ def generate_circuits(
     quiet=False,
     dry_run=False,
     status_interval=10.0,
+    not_gates="none",
 ):
     """
     Generate combinatorial circuits and save them to a db.
@@ -649,6 +650,9 @@ def generate_circuits(
                     nothing is written to the database. `db` may be ``None`` in this case.
     :param status_interval: Seconds between progress updates (number of graphs processed so far
                             and the rate since the previous update).
+    :param not_gates: ``'none'`` adds no NOT gates; ``'random'`` randomly inserts NOT gates on
+                      edges leaving source nodes (see `insert_random_source_edge_nots`);
+                      ``'all'`` is not implemented yet (prints a message and generates nothing).
     :returns: The number of circuits generated.
     """
     if not quiet:
@@ -657,8 +661,17 @@ def generate_circuits(
             f"min_num_inputs={min_num_inputs}, max_num_inputs={max_num_inputs}, "
             f"min_num_outputs={min_num_outputs}, max_num_outputs={max_num_outputs}, "
             f"gate_assignment={gate_assignment}, display_circuits={display_circuits}, output_dir={output_dir}, "
-            f"nauty_dir={nauty_dir}, quiet={quiet}, status_interval={status_interval}"
+            f"nauty_dir={nauty_dir}, quiet={quiet}, status_interval={status_interval}, "
+            f"not_gates={not_gates}"
         )
+
+    if not_gates not in ("none", "random", "all"):
+        raise ValueError(
+            f"Invalid not_gates: {not_gates!r} (expected 'none', 'random', or 'all')"
+        )
+    if not_gates == "all":
+        print("not_gates='all' is not implemented yet.")
+        return 0
 
     # Building a networkx DiGraph is the most expensive step per DAG, and most DAGs are rejected
     # for having a gate with out-of-range fan-in. So check fan-in on nauty's raw text first, and
@@ -725,7 +738,8 @@ def generate_circuits(
 
         for netlist in netlists_from_digraph:
             n += 1
-            insert_random_source_edge_nots(netlist)
+            if not_gates == "random":
+                insert_random_source_edge_nots(netlist)
             if not dry_run:
                 db.add(netlist)
 
@@ -753,6 +767,7 @@ def generate_circuits(
                 last_status_time = now
                 last_status_n = n
 
-    print(f"Generated {n} circuits ...")
     _print_filter_stats([nauty_fan_in_filter] + filters)
+    print(f"Generated {n} circuits ...")
+
     return n

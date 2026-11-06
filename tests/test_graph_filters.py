@@ -12,6 +12,7 @@ from rysy_dl import graph_filters
 from rysy_dl.circuit_generator import _add_single_sink, nauty_to_networkx
 from rysy_dl.graph_filters import (
     has_shared_internal_node,
+    max_shared_subcircuit_depth,
     nauty_in_degrees_in_range,
     non_sink_out_degrees_in_range,
     non_source_in_degrees_in_range,
@@ -395,6 +396,65 @@ def test_has_shared_internal_node_only_reused_sources_one_sink():
     graph.add_edge(4, 5)
 
     assert has_shared_internal_node(graph) is False
+
+
+# ── test max_shared_subcircuit_depth ────────────────────────────────────────────────────────────────────
+
+def _dag(*edges):
+    graph = nx.DiGraph()
+    graph.add_edges_from(edges)
+    return graph
+
+
+def test_max_shared_subcircuit_depth_empty_graph_is_zero():
+    assert max_shared_subcircuit_depth(nx.DiGraph()) == 0
+
+
+def test_max_shared_subcircuit_depth_only_sources_shared_is_zero():
+    # Inputs 0 and 1 each feed two gates; no gate output is reused.
+    graph = _dag((0, 2), (0, 3), (1, 2), (1, 3), (2, 5), (3, 5), (4, 5))
+    assert max_shared_subcircuit_depth(graph) == 0
+
+
+def test_max_shared_subcircuit_depth_shared_gate_fed_by_inputs_is_one():
+    graph = _dag((0, 2), (1, 2), (2, 3), (2, 4))
+    assert max_shared_subcircuit_depth(graph) == 1
+
+
+def test_max_shared_subcircuit_depth_shared_gate_at_end_of_chain():
+    # 0 -> 1 -> 2 -> 3, and 3 fans out to 4 and 5: shared node 3 is at depth 3.
+    graph = _dag((0, 1), (1, 2), (2, 3), (3, 4), (3, 5))
+    assert max_shared_subcircuit_depth(graph) == 3
+
+
+def test_max_shared_subcircuit_depth_uses_longest_path_to_shared_node():
+    # Node 4 is reachable directly from input 0 (length 1) and via 1 -> 2 -> 3 (length 3).
+    graph = _dag((0, 4), (1, 2), (2, 3), (3, 4), (4, 5), (4, 6))
+    assert max_shared_subcircuit_depth(graph) == 3
+
+
+def test_max_shared_subcircuit_depth_takes_max_over_shared_nodes():
+    # Node 1 (depth 1) and node 4 (depth 3) are both shared.
+    graph = _dag((0, 1), (1, 2), (1, 3), (2, 4), (3, 4), (4, 5), (4, 6))
+    assert max_shared_subcircuit_depth(graph) == 3
+
+
+def test_max_shared_subcircuit_depth_ignores_deeper_unshared_nodes():
+    # Node 1 is shared at depth 1; deeper nodes 2 and 3 are not shared.
+    graph = _dag((0, 1), (1, 2), (1, 3), (2, 4), (3, 4))
+    assert max_shared_subcircuit_depth(graph) == 1
+
+
+def test_max_shared_subcircuit_depth_positive_iff_has_shared_internal_node():
+    graphs = [
+        nx.DiGraph(),
+        _dag((0, 1), (0, 2)),
+        _dag((0, 1), (1, 2), (1, 3)),
+        _dag((0, 2), (0, 3), (1, 2), (1, 3), (2, 5), (3, 5), (4, 5)),
+        _dag((0, 1), (1, 2), (1, 3), (2, 4), (3, 4), (4, 5), (4, 6)),
+    ]
+    for graph in graphs:
+        assert (max_shared_subcircuit_depth(graph) > 0) == has_shared_internal_node(graph)
 
 
 # ── test only_leaves_shared ────────────────────────────────────────────────────────────────────

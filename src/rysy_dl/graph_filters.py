@@ -5,6 +5,8 @@ Boolean functions used to analyze a networkx DiGraph. These functions only consi
 they do not consider any gate assignments.
 """
 
+import networkx as nx
+
 from . import graph_analyzers
 
 def num_sources_in_range(graph, min_num: int, max_num: int):
@@ -71,6 +73,28 @@ def non_sink_out_degrees_in_range(graph, min_num: int, max_num:int):
                 return False
     return True
 
+def max_shared_subcircuit_depth(graph):
+    """
+    Measures how deep the deepest shared intermediate term in a circuit generated from this graph is.
+
+    A "shared" node is a non-source node (in_degree > 0) whose output is used more than once
+    (out_degree >= 2). The depth of the subcircuit rooted at a node is the length (in edges) of the
+    longest path from any source to that node -- the same convention used for overall circuit depth
+    (`nx.dag_longest_path_length`). So a shared gate fed directly by inputs has depth 1.
+
+    :param graph: A networkx DiGraph (must be acyclic) representing a circuit.
+    :returns: The maximum subcircuit depth over all shared non-source nodes, or 0 if no
+              non-source node is shared (i.e., only sources/inputs are reused).
+    """
+    level = {}
+    deepest = 0
+    for node in nx.topological_sort(graph):
+        level[node] = max((level[p] + 1 for p in graph.predecessors(node)), default=0)
+        if level[node] > 0 and graph.out_degree(node) >= 2:
+            deepest = max(deepest, level[node])
+    return deepest
+
+
 def has_shared_internal_node(graph):
     """
     Verifies that a circuit generated from this graph will have shared intermediate terms.
@@ -80,7 +104,7 @@ def has_shared_internal_node(graph):
     :param graph: A networkx DiGraph representing a circuit.
     :returns: True if at least one non-source node (a node with in_degree > 0) has an out_degree of at least 2.
     """
-    return any(graph.out_degree(node) >= 2 for node in graph.nodes() if graph.in_degree(node) > 0)
+    return max_shared_subcircuit_depth(graph) > 0
 
 
 def only_leaves_shared(graph):

@@ -1601,6 +1601,52 @@ def test_generate_circuits_invalid_gate_assignment_raises():
         _run_generate_circuits(["1 0"], db=None, gate_assignment='bogus')
 
 
+def test_generate_circuits_invalid_not_gates_raises():
+    with pytest.raises(ValueError, match="Invalid not_gates"):
+        _run_generate_circuits(["1 0"], db=None, not_gates='bogus')
+
+
+def test_generate_circuits_not_gates_defaults_to_none():
+    db = _RecordingDB()
+
+    with patch('rysy_dl.circuit_generator.insert_random_source_edge_nots') as inserter:
+        _run_generate_circuits(["2 0"], db)
+
+    inserter.assert_not_called()
+    assert all(db.added[0].nodes[node]['gate'] != 'NOT' for node in db.added[0].nodes)
+
+
+def test_generate_circuits_not_gates_random_inserts_nots_on_each_netlist():
+    db = _RecordingDB()
+
+    with patch('rysy_dl.circuit_generator.insert_random_source_edge_nots') as inserter:
+        result = _run_generate_circuits(["2 0", "2 0"], db, not_gates='random')
+
+    assert result == 2
+    assert [call.args[0] for call in inserter.call_args_list] == db.added
+
+
+def test_generate_circuits_not_gates_random_can_add_not_gates():
+    db = _RecordingDB()
+    random.seed(0)
+
+    # 20 copies of a two-input DAG: each source edge gets a NOT with probability 1/2,
+    # so at least one NOT gate is all but certain.
+    _run_generate_circuits(["2 0"] * 20, db, not_gates='random')
+
+    assert any(netlist.nodes[node]['gate'] == 'NOT' for netlist in db.added for node in netlist.nodes)
+
+
+def test_generate_circuits_not_gates_all_is_not_implemented(capsys):
+    db = _RecordingDB()
+
+    result = _run_generate_circuits(["2 0"], db, not_gates='all')
+
+    assert result == 0
+    assert db.added == []
+    assert "not implemented yet" in capsys.readouterr().out
+
+
 def test_generate_circuits_and_only_assigns_and_to_every_gate():
     db = _RecordingDB()
 
