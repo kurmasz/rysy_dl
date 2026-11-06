@@ -111,6 +111,36 @@ def circuit_stats(graph):
     }
 
 
+def stat_filter_where(**filters):
+    """
+    Build a SQL WHERE clause that filters circuits on the schema's stat columns.
+
+    Each keyword names a column in `_STAT_COLUMNS`. A single value requires an exact match, a
+    ``(min, max)`` tuple requires a value in that inclusive range, and ``None`` skips filtering
+    on that column.
+
+    :returns: A ``(where, params)`` pair suitable for `CircuitDatabase.iterate`: `where` is the
+              clause without the leading ``WHERE`` (or ``None`` if nothing is filtered), and
+              `params` is the tuple of values for its ``?`` placeholders.
+    :raises ValueError: If a keyword isn't a stat column.
+    """
+    where_parts = []
+    params = []
+    for column, value in filters.items():
+        if column not in _STAT_COLUMNS:
+            raise ValueError(f"Not a circuit stat column: {column!r}")
+        if value is None:
+            continue
+        if isinstance(value, tuple):
+            lo, hi = value
+            where_parts.append(f"{column} BETWEEN ? AND ?")
+            params.extend([lo, hi])
+        else:
+            where_parts.append(f"{column} = ?")
+            params.append(value)
+    return (" AND ".join(where_parts) or None), tuple(params)
+
+
 def row_to_record(row):
     """
     Convert a `sqlite3.Row` (or any mapping with the schema's column names) into a plain dict
@@ -298,6 +328,24 @@ class CircuitDatabase:
         """
         return self._to_circuit(self.get_entry(circuit_id))
 
+    def iterate_entries(self, *, num_gates=None, num_inputs=None, depth=None,
+                        max_indegree=None, max_gate_outdegree=None, max_input_outdegree=None,
+                        gate_type_mask=None, has_shared_subexpressions=None):
+        """
+        Iterate over the circuits that match the given filters, one row at a time, ordered by `id`.
+
+        Takes the same filter keywords as `get_random_entry` (see `stat_filter_where`), except that
+        every filter defaults to ``None``, so with no arguments every circuit is returned.
+
+        :yields: A dict (see `row_to_record`) for each matching circuit.
+        """
+        where, params = stat_filter_where(
+            num_gates=num_gates, num_inputs=num_inputs, depth=depth, max_indegree=max_indegree,
+            max_gate_outdegree=max_gate_outdegree, max_input_outdegree=max_input_outdegree,
+            gate_type_mask=gate_type_mask, has_shared_subexpressions=has_shared_subexpressions,
+        )
+        return self.iterate(where, params)
+
     def get_random_entry(self, *, num_gates=None, num_inputs=(1, 4), depth=None,
                           max_indegree=None, max_gate_outdegree=None, max_input_outdegree=None,
                           gate_type_mask=None, has_shared_subexpressions=None, allow_empty_result=False):
@@ -310,33 +358,15 @@ class CircuitDatabase:
 
         :returns: A dict (see `row_to_record`), or ``None`` if no circuit matches.
         """
-        filters = {
-            'num_gates': num_gates,
-            'num_inputs': num_inputs,
-            'depth': depth,
-            'max_indegree': max_indegree,
-            'max_gate_outdegree': max_gate_outdegree,
-            'max_input_outdegree': max_input_outdegree,
-            'gate_type_mask': gate_type_mask,
-            'has_shared_subexpressions': has_shared_subexpressions,
-        }
-
-        where_parts = []
-        params = []
-        for column, value in filters.items():
-            if value is None:
-                continue
-            if isinstance(value, tuple):
-                lo, hi = value
-                where_parts.append(f"{column} BETWEEN ? AND ?")
-                params.extend([lo, hi])
-            else:
-                where_parts.append(f"{column} = ?")
-                params.append(value)
+        where, params = stat_filter_where(
+            num_gates=num_gates, num_inputs=num_inputs, depth=depth, max_indegree=max_indegree,
+            max_gate_outdegree=max_gate_outdegree, max_input_outdegree=max_input_outdegree,
+            gate_type_mask=gate_type_mask, has_shared_subexpressions=has_shared_subexpressions,
+        )
 
         sql = f"SELECT * FROM {TABLE_NAME}"
-        if where_parts:
-            sql += " WHERE " + " AND ".join(where_parts)
+        if where:
+            sql += f" WHERE {where}"
         sql += " ORDER BY RANDOM() LIMIT 1"
 
         row = self._conn.execute(sql, params).fetchone()

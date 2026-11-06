@@ -117,6 +117,17 @@ def test_coerce_int_invalid_exits(capsys):
     assert "must be an integer" in capsys.readouterr().err
 
 
+def test_coerce_float_valid():
+    assert cli._coerce('status_interval', '2.5', float, 'params.cfg') == 2.5
+
+
+def test_coerce_float_invalid_exits(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        cli._coerce('status_interval', 'soon', float, 'params.cfg')
+    assert exc_info.value.code == 1
+    assert "must be a number" in capsys.readouterr().err
+
+
 def test_coerce_str_passthrough():
     assert cli._coerce('gate_assignment', 'all', str, 'params.cfg') == 'all'
 
@@ -258,6 +269,7 @@ def test_cmd_generate_circuits_creates_new_db_and_calls_generate_circuits(tmp_pa
     assert calls['min_num_inputs'] == 3
     assert calls['gate_assignment'] == 'random'   # default
     assert calls['display_circuits'] is False     # default
+    assert calls['status_interval'] == 10.0       # default
     assert isinstance(calls['db'], FakeDB)
 
 
@@ -352,6 +364,17 @@ def test_cmd_generate_circuits_if_exists_rejects_bad_value(tmp_path, capsys):
     assert "if_exists" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize('interval', [0, -1.5])
+def test_cmd_generate_circuits_rejects_non_positive_status_interval(tmp_path, capsys, interval):
+    args = make_args(db_name=str(tmp_path / 'circuits.db'), status_interval=interval)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.cmd_generate_circuits(args)
+
+    assert exc_info.value.code == 1
+    assert "status_interval" in capsys.readouterr().err
+
+
 def test_cmd_generate_circuits_reports_nauty_setup_error(tmp_path, monkeypatch, capsys):
     db_path = tmp_path / "circuits.db"
 
@@ -405,7 +428,7 @@ def test_cmd_layout_success(tmp_path, monkeypatch, capsys):
 
 def test_main_generate_circuits_merges_config_and_cli(tmp_path, monkeypatch):
     cfg = tmp_path / "params.cfg"
-    cfg.write_text("dag_size: 9\nmin_fan_in: 3\ngate_assignment: all\n")
+    cfg.write_text("dag_size: 9\nmin_fan_in: 3\ngate_assignment: all\nstatus_interval: 30\n")
     db_path = tmp_path / "circuits.db"
 
     monkeypatch.setattr(cli.circuit_database, 'create', lambda p: None)
@@ -424,4 +447,76 @@ def test_main_generate_circuits_merges_config_and_cli(tmp_path, monkeypatch):
     assert calls['dag_size'] == 4              # CLI overrides file
     assert calls['min_num_inputs'] == 3         # from file
     assert calls['gate_assignment'] == 'all'    # from file
+    assert calls['status_interval'] == 30.0     # from file
     assert calls['display_circuits'] is False        # hardcoded default
+
+
+# ── view-circuits filters ─────────────────────────────────────────────────
+
+def test_int_or_range_single_value():
+    assert cli._int_or_range('3') == 3
+
+
+def test_int_or_range_range():
+    assert cli._int_or_range('2-5') == (2, 5)
+
+
+@pytest.mark.parametrize('text', ['', 'x', '2-', '-5', '2-x', '1-2-3'])
+def test_int_or_range_rejects_malformed(text):
+    with pytest.raises(argparse.ArgumentTypeError):
+        cli._int_or_range(text)
+
+
+def test_view_circuits_parses_filter_options(monkeypatch):
+    received = []
+    monkeypatch.setattr(cli, 'cmd_view_circuits', received.append)
+    monkeypatch.setattr(sys, 'argv', ['rysy_dl', 'view-circuits', 'foo.db', '--num-inputs', '2-4',
+                                      '--depth', '3', '--no-has-shared-subexpressions'])
+
+    cli.main()
+
+    args = received[0]
+    assert args.num_inputs == (2, 4)
+    assert args.depth == 3
+    assert args.has_shared_subexpressions is False
+    for name in cli.VIEW_CIRCUITS_FILTERS.keys() - {'num_inputs', 'depth'}:
+        assert getattr(args, name) is None
+
+
+def test_view_circuits_id_with_filter_exits(capsys):
+    args = argparse.Namespace(db_name='foo.db', id=3, has_shared_subexpressions=None,
+                              **{name: None for name in cli.VIEW_CIRCUITS_FILTERS})
+    args.num_gates = 4
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.cmd_view_circuits(args)
+
+    assert exc_info.value.code == 1
+    assert "--id can't be combined" in capsys.readouterr().err
+
+
+def test_view_circuits_shows_each_matching_circuit_with_id_in_title_prefix(tmp_path, monkeypatch):
+    import networkx as nx
+    from rysy_dl import circuit_database
+
+    db_path = str(tmp_path / "circuits.sqlite")
+    circuit_database.create(db_path)
+    with circuit_database.CircuitDatabase(db_path) as db:
+        for num_inputs in (2, 3, 3):
+            graph = nx.DiGraph()
+            graph.add_nodes_from(range(num_inputs), gate='src')
+            graph.add_node(num_inputs, gate='AND')
+            graph.add_edges_from((source, num_inputs) for source in range(num_inputs))
+            db.add(graph)
+
+    mock_display = MagicMock()
+    mock_display.show_netlist.return_value = False  # never quit early
+    monkeypatch.setattr(cli, 'circuit_generator_display', mock_display)
+    args = argparse.Namespace(db_name=db_path, id=None, has_shared_subexpressions=None,
+                              **{name: None for name in cli.VIEW_CIRCUITS_FILTERS})
+    args.num_inputs = 3
+
+    cli.cmd_view_circuits(args)
+
+    title_prefixes = [call.kwargs['title_prefix'] for call in mock_display.show_netlist.call_args_list]
+    assert title_prefixes == ['id=2', 'id=3']

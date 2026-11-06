@@ -15,8 +15,9 @@ from . import circuit_database
 from . import circuit_generator_display
 from .circuit_generator import generate_circuits
 from .circuit_analyzer import circuit_to_expression
-from .circuit_layout import layout_circuit, assign_source_labels
+from .circuit_layout import layout_circuit
 from .logging_config import PROGRESS
+from rysy_dl import circuit_generator
 
 #
 # Logging setup
@@ -50,6 +51,7 @@ GENERATE_CIRCUITS_DEFAULTS = {
     'nauty_dir': None,
     'if_exists': None,
     'dry_run': False,
+    'status_interval': 10.0,
 }
 
 GENERATE_CIRCUITS_CHOICES = {
@@ -71,6 +73,7 @@ GENERATE_CIRCUITS_TYPES = {
     'db_name': str,
     'if_exists': str,
     'dry_run': bool,
+    'status_interval': float,
 }
 
 TRUE_STRINGS = ('true', 'yes', 'on', '1')
@@ -112,6 +115,12 @@ def _coerce(name, raw, expected_type, path):
             return int(raw)
         except ValueError:
             print(f"Error in config file '{path}': '{name}' must be an integer, got {raw!r}", file=sys.stderr)
+            sys.exit(1)
+    if expected_type is float:
+        try:
+            return float(raw)
+        except ValueError:
+            print(f"Error in config file '{path}': '{name}' must be a number, got {raw!r}", file=sys.stderr)
             sys.exit(1)
     return raw
 
@@ -164,6 +173,10 @@ def cmd_generate_circuits(args):
         print(f"Error: 'if_exists' must be one of ['insert', 'overwrite'], got {args.if_exists!r}", file=sys.stderr)
         sys.exit(1)
 
+    if args.status_interval <= 0:
+        print(f"Error: 'status_interval' must be greater than 0, got {args.status_interval!r}", file=sys.stderr)
+        sys.exit(1)
+
     if args.dry_run:
         try:
             generate_circuits(
@@ -180,6 +193,7 @@ def cmd_generate_circuits(args):
                 output_dir=args.output_dir,
                 nauty_dir=args.nauty_dir,
                 dry_run=True,
+                status_interval=args.status_interval,
             )
         except (NotADirectoryError, FileNotFoundError, PermissionError) as e:
             print(f"Error: nauty setup problem: {e}", file=sys.stderr)
@@ -221,7 +235,8 @@ def cmd_generate_circuits(args):
                 gate_assignment=args.gate_assignment,
                 display_circuits=args.show_graphs,
                 output_dir=args.output_dir,
-                nauty_dir=args.nauty_dir
+                nauty_dir=args.nauty_dir,
+                status_interval=args.status_interval,
             )
     except (NotADirectoryError, FileNotFoundError, PermissionError) as e:
         print(f"Error: nauty setup problem: {e}", file=sys.stderr)
@@ -242,38 +257,60 @@ def cmd_layout(args):
     diagram.draw()
 
 
+# view-circuits options that restrict which circuits are shown: one per keyword of
+# CircuitDatabase.get_random_entry / iterate_entries, mapped to its --help description.
+# (has_shared_subexpressions is a yes/no option, so it is added separately.)
+VIEW_CIRCUITS_FILTERS = {
+    'num_gates': 'number of gates (non-input nodes, including NOT gates)',
+    'num_inputs': 'number of input variables',
+    'depth': 'length of the longest path from an input to the output',
+    'max_indegree': 'largest fan-in of any gate',
+    'max_gate_outdegree': 'largest fan-out of any gate',
+    'max_input_outdegree': 'largest fan-out of any input variable',
+    'gate_type_mask': 'gate_type_mask bitmask (see circuit_database.GATE_BITS)',
+}
+
+
+def _int_or_range(text):
+    """argparse type for a view-circuits filter: an int (exact match) or MIN-MAX (inclusive range)."""
+    lo, sep, hi = text.partition('-')
+    try:
+        return (int(lo), int(hi)) if sep else int(lo)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected an integer or a MIN-MAX range, got {text!r}")
+
+
 def cmd_view_circuits(args):
-    import io
-    import cairosvg  # imported lazily: only this many-graphs display loop needs the matplotlib-leak workaround.
-    import schemdraw
-    schemdraw.use('svg')  # Use pure-Python SVG backend to avoid matplotlib's memory leak
+    filters = {name: getattr(args, name) for name in VIEW_CIRCUITS_FILTERS}
+    filters['has_shared_subexpressions'] = args.has_shared_subexpressions
+    if args.id is not None and any(value is not None for value in filters.values()):
+        print("Error: --id can't be combined with filter options", file=sys.stderr)
+        sys.exit(1)
 
     try:
         with circuit_database.CircuitDatabase(args.db_name) as db:
             if args.id is not None:
-                record = db.get_circuit(args.id)
+                record = db.get_entry(args.id)
                 if record is None:
                     print(f"Error: no circuit with id {args.id} in '{args.db_name}'", file=sys.stderr)
                     sys.exit(1)
                 records = [record]
             else:
-                records = db.iterate()
+                records = db.iterate_entries(**filters)
 
+            num_shown = 0
             for record in records:
+                num_shown += 1
                 netlist = record['graph']
-                assign_source_labels(netlist)
-                # circuit_generator_display.display_raw_graph(netlist)
-                # The id is shown in the title so it can be passed to --id later to redisplay this same circuit.
-                circuit_generator_display.set_figure_title(f"id={record['id']}: {circuit_to_expression(netlist)}")
 
-                assign_source_labels(netlist)
-                circuit_diagram = layout_circuit(netlist)
-                png = io.BytesIO()
-                cairosvg.svg2png(bytestring=circuit_diagram.get_imagedata(fmt='svg'), write_to=png)
-                circuit_generator_display.display_circuit_from_bytestring(png.getvalue(), graph_width_in=0)
-                if circuit_generator_display.wait_for_keypress():
+                # circuit_generator.assign_gates_randomly(netlist)
+                # The id is shown in the title so it can be passed to --id later to redisplay this same circuit.
+                if circuit_generator_display.show_netlist(netlist, title_prefix=f"id={record['id']}"):
                     print(" .")
                     break
+
+            if num_shown == 0:
+                print(f"No circuits in '{db.db_path}' match the given filters")
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -317,6 +354,8 @@ def main():
     gc_parser.add_argument('--dry-run', action=argparse.BooleanOptionalAction, default=None,
                             help='Run generation without writing to the database. The database file is '
                                  'never created, opened, or modified (default: False)')
+    gc_parser.add_argument('--status-interval', type=float, default=None,
+                            help='Seconds between progress updates (default: 10)')
     gc_parser.set_defaults(func=cmd_generate_circuits)
 
     layout_parser = subparsers.add_parser('layout', help='Render a circuit from a .pkl file')
@@ -331,6 +370,15 @@ def main():
                                        help='Only display the circuit with this id, instead of stepping through '
                                             'the whole database. The id is shown in the title of each circuit '
                                             'as it is displayed.')
+    for name, description in VIEW_CIRCUITS_FILTERS.items():
+        view_circuits_parser.add_argument(f"--{name.replace('_', '-')}", type=_int_or_range, default=None,
+                                           metavar='N|MIN-MAX',
+                                           help=f'Only display circuits whose {description} is N, '
+                                                f'or between MIN and MAX inclusive.')
+    view_circuits_parser.add_argument('--has-shared-subexpressions', action=argparse.BooleanOptionalAction,
+                                       default=None,
+                                       help='Only display circuits that do (or, with --no-has-shared-subexpressions, '
+                                            'do not) have a gate whose output feeds more than one other gate.')
     view_circuits_parser.set_defaults(func=cmd_view_circuits)
 
     args = parser.parse_args()

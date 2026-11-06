@@ -5,6 +5,7 @@ Unit tests for circuit_generator.py.
 import inspect
 import io
 import os
+import random
 import sys
 import stat
 from collections import Counter
@@ -49,7 +50,7 @@ from rysy_dl.circuit_generator import (  # noqa: E402 --- tell linter to ignore 
     verify_nauty, find_nauty, generate_nauty_digraphs, nauty_to_networkx,
     _add_single_sink, assign_all_gates_and, assign_gates_randomly_ensure_diversity,
     assign_gates_randomly, all_gate_assignment, generate_circuits,
-    _not_node_inserter, insert_random_source_edge_nots,
+    _not_node_inserter, insert_random_source_edge_nots, CountingFilter,
 )
 from rysy_dl.circuit_filters import no_collapsable_children  # noqa: E402
 
@@ -1733,7 +1734,8 @@ def test_generate_circuits_display_stops_early_when_show_netlist_quits(monkeypat
     # so the remaining two dag lines are never processed.
     assert result == 1
     assert len(db.added) == 1
-    assert mock_display.show_netlist.call_count == 1
+    # Only the circuit itself is displayed (not the raw DAG it came from).
+    mock_display.show_netlist.assert_called_once_with(db.added[0])
 
 
 def test_generate_circuits_display_continues_when_show_netlist_does_not_quit(monkeypatch):
@@ -1751,13 +1753,71 @@ def test_generate_circuits_display_continues_when_show_netlist_does_not_quit(mon
     assert mock_display.show_netlist.call_count == 3
 
 
-def test_generate_circuits_prints_status_and_collects_garbage_every_100000(capsys):
+def test_generate_circuits_prints_status_every_status_interval_seconds(capsys):
     db = _RecordingDB()
-    lines = ["1 0"] * 100000
+    # The clock reads 0 at startup, then advances one second per graph processed.
+    clock = iter(range(100))
 
-    with patch('rysy_dl.circuit_generator.gc.collect') as mock_gc_collect:
-        result = _run_generate_circuits(lines, db, gate_assignment='and-only', quiet=True)
+    with patch('rysy_dl.circuit_generator.time.monotonic', lambda: next(clock)):
+        result = _run_generate_circuits(["1 0"] * 5, db, status_interval=2)
 
-    assert result == 100000
-    assert mock_gc_collect.call_count == 1
-    assert "Processed 100000 graphs" in capsys.readouterr().out
+    assert result == 5
+    out = capsys.readouterr().out
+    assert "Processed 2 graphs (1 graphs/s)" in out
+    assert "Processed 4 graphs (1 graphs/s)" in out
+    assert out.count("Processed") == 2
+
+
+def test_counting_filter_str_reports_rejection_percentage():
+    f = CountingFilter("even", lambda x: x % 2 == 0)
+    list(filter(f, range(4)))
+    assert str(f) == "even: 2/4 (50.00%) rejected"
+
+
+def test_counting_filter_str_handles_nothing_evaluated():
+    assert str(CountingFilter("never_run", lambda x: True)) == "never_run: 0/0 rejected"
+
+
+def test_generate_circuits_prints_no_status_before_status_interval_elapses(capsys):
+    db = _RecordingDB()
+
+    result = _run_generate_circuits(["1 0"] * 5, db, status_interval=3600)
+
+    assert result == 5
+    assert "Processed" not in capsys.readouterr().out
+
+
+# ── test reassigning gates on a finished circuit (NOT gates are kept) ───────────────────────
+
+def _finished_circuit_with_nots():
+    """Three inputs -> two 2-input gates -> one 2-input output gate, with a NOT inserted on
+    every source edge, as generate_circuits produces before adding a circuit to the db."""
+    graph = nx.DiGraph([(0, 3), (1, 3), (1, 4), (2, 4), (3, 5), (4, 5)])
+    assign_all_gates_and(graph)
+    for source in (0, 1, 2):
+        _not_node_inserter(graph, source, (True,) * graph.out_degree(source))
+    return graph
+
+
+@pytest.mark.parametrize('ensure_diversity', [True, False])
+def test_assign_gates_randomly_keeps_existing_not_gates(ensure_diversity):
+    for seed in range(50):
+        random.seed(seed)
+        graph = _finished_circuit_with_nots()
+        not_nodes = {node for node in graph if graph.nodes[node]['gate'] == 'NOT'}
+
+        assign_gates_randomly(graph, ensure_diversity=ensure_diversity)
+
+        assert {node for node in graph if graph.nodes[node]['gate'] == 'NOT'} == not_nodes
+        assert {graph.nodes[node]['gate'] for node in (3, 4, 5)} <= {'AND', 'OR', 'XOR', 'NAND', 'NOR'}
+
+
+def test_assign_gates_randomly_ensure_diversity_does_not_count_not_gates():
+    # Only the 3 non-NOT gates are assigned (not 3 NOTs + 3 gates = 6), and with 3 gates
+    # ensure_diversity uses each of the three simple gates exactly once.
+    random.seed(0)
+    graph = _finished_circuit_with_nots()
+
+    assign_gates_randomly_ensure_diversity(graph)
+
+    assert sorted(graph.nodes[node]['gate'] for node in (3, 4, 5)) == ['AND', 'OR', 'XOR']

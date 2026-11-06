@@ -27,7 +27,6 @@ Common workflow:
 """
 
 import copy
-import gc
 import os
 import random
 import shlex
@@ -39,7 +38,6 @@ import networkx as nx
 from itertools import product
 
 from .logging_config import get_logger
-from .graph_analyzers import num_sources_and_gates
 from .graph_filters import (
     nauty_in_degrees_in_range,
     num_sources_in_range,
@@ -260,9 +258,18 @@ def _apply_gate_assignment(graph, gates: tuple, gate_list):
     for node, gate in enumerate(gates):
         if graph.in_degree(node) == 0:
             attrs[node] = {"gate": "src"}
+        elif _is_not_gate(graph, node):
+            attrs[node] = {"gate": "NOT"}
         else:
             attrs[node] = {"gate": gate_list[gate]}
     nx.set_node_attributes(graph, attrs)
+
+
+def _is_not_gate(graph, node):
+    # NOT gates are added by insert_random_source_edge_nots after the other gates are assigned.
+    # Reassigning gates on a finished circuit (e.g. from the display's "Reassign Gates" button)
+    # must leave them alone, or a NOT could become, say, a 1-input AND and lose its inversion.
+    return graph.nodes[node].get("gate") == "NOT"
 
 
 def assign_all_gates_and(graph):
@@ -295,7 +302,11 @@ def assign_gates_randomly_ensure_diversity(graph, include_xnor=False):
     num_gate_choices = len(simple_gates) + len(tricky_gates)
     max_gates_supported = num_gate_choices + 1 + 2 * len(simple_gates)
 
-    _, num_gates, _ = num_sources_and_gates(graph)
+    num_gates = sum(
+        1
+        for node in graph.nodes()
+        if graph.in_degree(node) != 0 and not _is_not_gate(graph, node)
+    )
 
     if num_gates <= len(simple_gates):
         chosen_gates = random.sample(simple_gates, num_gates)
@@ -329,13 +340,14 @@ def assign_gates_randomly_ensure_diversity(graph, include_xnor=False):
 
     random.shuffle(chosen_gates)
 
-    # chosen_gates has exactly one entry per gate (non-source) node; walk the
+    # chosen_gates has exactly one entry per gate (non-source, non-NOT) node; walk the
     # graph in node order and hand them out, marking source nodes as 'src'
     chosen_iter = iter(chosen_gates)
     attrs = {
         node: (
             {"gate": "src"}
             if graph.in_degree(node) == 0
+            else {"gate": "NOT"} if _is_not_gate(graph, node)
             else {"gate": next(chosen_iter)}
         )
         for node in range(len(graph))
@@ -564,7 +576,10 @@ class CountingFilter:
         return passed
 
     def __str__(self):
-        return f"{self.name}: {self.rejected}/{self.evaluated} rejected"
+        # A filter downstream of one that rejected everything never evaluates anything.
+        if self.evaluated == 0:
+            return f"{self.name}: 0/0 rejected"
+        return f"{self.name}: {self.rejected}/{self.evaluated} ({(self.rejected / self.evaluated)*100:.2f}%) rejected"
 
 
 def _print_filter_stats(filters):
@@ -591,6 +606,7 @@ def generate_circuits(
     nauty_dir=None,
     quiet=False,
     dry_run=False,
+    status_interval=10.0,
 ):
     """
     Generate combinatorial circuits and save them to a db.
@@ -631,6 +647,8 @@ def generate_circuits(
                            `output_dir`. If ``False``, only the pickle file is written.
     :param dry_run: If ``True``, run the full generation process but skip ``db.add`` so
                     nothing is written to the database. `db` may be ``None`` in this case.
+    :param status_interval: Seconds between progress updates (number of graphs processed so far
+                            and the rate since the previous update).
     :returns: The number of circuits generated.
     """
     if not quiet:
@@ -639,7 +657,7 @@ def generate_circuits(
             f"min_num_inputs={min_num_inputs}, max_num_inputs={max_num_inputs}, "
             f"min_num_outputs={min_num_outputs}, max_num_outputs={max_num_outputs}, "
             f"gate_assignment={gate_assignment}, display_circuits={display_circuits}, output_dir={output_dir}, "
-            f"nauty_dir={nauty_dir}, quiet={quiet}"
+            f"nauty_dir={nauty_dir}, quiet={quiet}, status_interval={status_interval}"
         )
 
     # Building a networkx DiGraph is the most expensive step per DAG, and most DAGs are rejected
@@ -685,6 +703,7 @@ def generate_circuits(
     n = 0
     dag_count = 0
     last_status_time = time.monotonic()
+    last_status_n = 0
     for raw_digraph in filtered_dags_iter:
         dag_count += 1
 
@@ -720,18 +739,19 @@ def generate_circuits(
                 from . import circuit_generator_display
 
                 #  show_netlist returns True if the user pressed 'q' to quit early, False otherwise.
-                if circuit_generator_display.show_netlist(netlist, raw_digraph):
+                if circuit_generator_display.show_netlist(netlist):
                     print(" .")
                     _print_filter_stats([nauty_fan_in_filter] + filters)
                     return n
 
-            if n % 100000 == 0:
-                now = time.monotonic()
+            now = time.monotonic()
+            if now - last_status_time >= status_interval:
                 print(
-                    f"Processed {n} graphs ({now - last_status_time:.1f}s since last update)"
+                    f"Processed {n} graphs ({(n - last_status_n) / (now - last_status_time):.0f} graphs/s)"
                 )
+                _print_filter_stats([nauty_fan_in_filter] + filters)
                 last_status_time = now
-                gc.collect()
+                last_status_n = n
 
     print(f"Generated {n} circuits ...")
     _print_filter_stats([nauty_fan_in_filter] + filters)
