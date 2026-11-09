@@ -167,6 +167,21 @@ with `scripts/pl_course.sh install` at least once.
 
 On Linux, files created by Docker in the course directory may be owned by `root`.
 
+## Limitations
+
+The generation algorithm skips circuits where the output gate has both as an input and a sub-circuit that depends on X. 
+
+The generation algorithm iterates over all n-node DAGs (including disconnected DAGs), then adds an additional node whose inputs are all the nodes with out-degree 0. This ensures that there is only one output.  However, it means that a source X is only an input to this last gate if it is not an input to any other gate. This algorithm will generate, for example, `AB + C`, but will not generate `AB + A + C`
+
+Addressing this limitation will add considerably to the runtime.
+
+  * Option 1: Iterate over all DAGs of size `n` instead of `n - 1`, then filter out any DAGs with more than
+    one sink. When enumerating circuits where the number of inputs plus the number of gates is 9, this approach would mean 3.2 billion DAGs instead of 20 million.
+  * Option 2: Iterate over all possible combinations of gates with out-degree >= 0 to be used as inputs to
+    the output gate. This approach would possibly generate isomorphic circuits that would then need to be detected and removed.
+
+We decided to avoid this expense because most of the circuits generated in this manner would not be particularly "interesting" for exercises. Any circuit where X and a subcircuit that depends on X are inputs to the final gate can be trivially simplified.  For example `X + G(X, ...) = X + G(0, ....)`.
+
 ## License
 
 MIT -- see [LICENSE](LICENSE).

@@ -1,0 +1,26 @@
+
+Ideas:
+   * Completely enumerate all "good" circuits with 2 inputs.  There are relatively 
+     few of them, because as the number of nodes increase, the vast majority of 
+     circuits become "dumb" (trivially simplifiable)
+   * May also be true of 3 input circuits.
+
+
+
+8 nodes produces 20 Million starting points. 
+9 nodes produces 3.4 Billion starting points
+
+$ ./geng 8 | ./directg -au
+>A ./geng -d0D7 n=8 e=0-28
+>A directg -au
+>Z 12346 graphs generated in 0.01 sec
+>Z 12346 graphs read from stdin; 20286025 digraphs generated; 2.38 sec
+
+
+eos12 ~/nauty2_9_3  
+$ ./geng 9 | ./directg -au
+>A directg -au
+>A ./geng -d0D8 n=9 e=0-36
+>Z 274668 graphs generated in 0.10 sec
+>Z 274668 graphs read from stdin; 3424938010 digraphs generated; 344.09 sec
+

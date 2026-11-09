@@ -49,7 +49,7 @@ import rysy_dl  # noqa: E402 --- needed to patch rysy_dl.circuit_generator_displ
 from rysy_dl.circuit_generator import (  # noqa: E402 --- tell linter to ignore import position
     verify_nauty, find_nauty, generate_nauty_digraphs, nauty_to_networkx,
     _add_single_sink, assign_all_gates_and, assign_gates_randomly_ensure_diversity,
-    assign_gates_randomly, all_gate_assignment, generate_circuits,
+    assign_gates_randomly, all_gate_assignments_without_collapsable_children, generate_circuits,
     _not_node_inserter, insert_random_source_edge_nots, CountingFilter,
 )
 from rysy_dl.circuit_filters import no_collapsable_children  # noqa: E402
@@ -542,7 +542,7 @@ def test_parses_all_sample_lines_without_error(num_nodes, line):
 
 # no_collapsable_children itself is now tested in test_circuit_filters.py;
 # the remaining reference to it below only exercises its use as a filter
-# passed into all_gate_assignment.
+# passed into all_gate_assignments_without_collapsable_children.
 
 # ── test _add_single_sink ─────────────────────────────────────────────
 
@@ -1201,7 +1201,7 @@ def test_xor_and_xnor_can_be_assigned_to_a_two_input_node():
     assert seen == {'XOR', 'XNOR'}
 
 
-# ── test all_gate_assignment ─────────────────────────────────────────────
+# ── test all_gate_assignments_without_collapsable_children ─────────────────────────────────────────────
 
 def test_source_nodes_always_labeled_src():
     """Every yielded assignment must label the graph's source nodes 'src',
@@ -1209,7 +1209,7 @@ def test_source_nodes_always_labeled_src():
     G = nx.DiGraph()
     G.add_edge(0, 2)
     G.add_edge(1, 2)  # node 2: gate, fan-in 2
-    for circuit in all_gate_assignment(G, gate_list=('AND', 'OR')):
+    for circuit in all_gate_assignments_without_collapsable_children(G, gate_list=('AND', 'OR')):
         assert circuit.nodes[0]['gate'] == 'src'
         assert circuit.nodes[1]['gate'] == 'src'
 
@@ -1222,13 +1222,13 @@ def test_no_duplicate_assignments_from_source_node_slots():
     G.add_edge(0, 2)
     G.add_edge(1, 2)  # node 2: the only gate node, fan-in 2
     gate_list = ('AND', 'OR', 'XOR')
-    results = list(all_gate_assignment(G, gate_list=gate_list))
+    results = list(all_gate_assignments_without_collapsable_children(G, gate_list=gate_list))
     assert len(results) == len(gate_list)
     seen = {circuit.nodes[2]['gate'] for circuit in results}
     assert seen == {'AND', 'OR', 'XOR'}
 
 
-def test_all_gate_assignment_xor_and_xnor_never_assigned_to_non_two_input_node():
+def test_all_gate_assignments_xor_and_xnor_never_assigned_to_non_two_input_node():
     """A node with fan-in != 2 must never be labeled XOR or XNOR in any
     yielded assignment, including fan-in 3 and up."""
     G = nx.DiGraph()
@@ -1237,19 +1237,19 @@ def test_all_gate_assignment_xor_and_xnor_never_assigned_to_non_two_input_node()
     G.add_edge(1, 4)
     G.add_edge(2, 4)  # node 4: fan-in 3
     gate_list = ('AND', 'OR', 'XOR', 'XNOR')
-    for circuit in all_gate_assignment(G, gate_list=gate_list):
+    for circuit in all_gate_assignments_without_collapsable_children(G, gate_list=gate_list):
         assert circuit.nodes[3]['gate'] not in ('XOR', 'XNOR')
         assert circuit.nodes[4]['gate'] not in ('XOR', 'XNOR')
 
 
-def test_all_gate_assignment_xor_and_xnor_can_be_assigned_to_a_two_input_node():
+def test_all_gate_assignments_xor_and_xnor_can_be_assigned_to_a_two_input_node():
     """Sanity check for the above: a fan-in-2 node must still be eligible to
     receive XOR/XNOR -- the restriction applies only to the wrong-fan-in nodes."""
     G = nx.DiGraph()
     G.add_edge(0, 2)
     G.add_edge(1, 2)  # node 2: fan-in 2
     gate_list = ('AND', 'XOR', 'XNOR')
-    seen = {circuit.nodes[2]['gate'] for circuit in all_gate_assignment(G, gate_list=gate_list)}
+    seen = {circuit.nodes[2]['gate'] for circuit in all_gate_assignments_without_collapsable_children(G, gate_list=gate_list)}
     assert seen == {'AND', 'XOR', 'XNOR'}
 
 
@@ -1269,7 +1269,7 @@ def test_root_pruning_excludes_collapsable_parent_child_pairs():
 
     gate_list = ('AND', 'OR', 'NAND', 'NOR')
     forbidden_child = {'AND': 'AND', 'NAND': 'AND', 'OR': 'OR', 'NOR': 'OR'}
-    results = list(all_gate_assignment(G, gate_list=gate_list))
+    results = list(all_gate_assignments_without_collapsable_children(G, gate_list=gate_list))
 
     assert len(results) == 4 * 3 * 3
     for circuit in results:
@@ -1278,10 +1278,9 @@ def test_root_pruning_excludes_collapsable_parent_child_pairs():
             assert circuit.nodes[child]['gate'] != forbidden_child[root_gate]
 
 
-def test_root_pruning_does_not_reach_non_root_pairs():
-    """Only the root's own children are pruned -- a collapsable pair further down
-    the graph (here, node 4's gate matching its own child node 2's gate) is left
-    for the caller's filter_list to catch, so it must still appear in the output."""
+def test_pruning_reaches_pairs_below_the_root():
+    """Collapsable pairs anywhere in the graph are never produced, not just the root's:
+    here node 4 (not the root) must never have the same gate as its own child node 2."""
     G = nx.DiGraph()
     G.add_edge(0, 2)
     G.add_edge(1, 2)  # node 2: gate, fan-in 2 (sources 0, 1)
@@ -1290,25 +1289,19 @@ def test_root_pruning_does_not_reach_non_root_pairs():
     G.add_edge(4, 5)  # node 5: root, fan-in 1, child is node 4
 
     gate_list = ('AND', 'OR')
-    results = list(all_gate_assignment(G, gate_list=gate_list))
+    results = list(all_gate_assignments_without_collapsable_children(G, gate_list=gate_list))
 
-    # root (5) and its only child (4) are pruned: 4 must never match 5's forbidden gate
+    # with only AND and OR, every gate must differ from its parent: 2 choices for the
+    # root, then 1 for each gate below it
+    assert len(results) == 2
     for circuit in results:
-        root_gate = circuit.nodes[5]['gate']
-        assert circuit.nodes[4]['gate'] != root_gate
-
-    # but node 4 (parent) matching node 2 (its own child) is a collapsable pair one
-    # level below the root, and must still show up since it isn't pruned
-    assert any(
-        circuit.nodes[4]['gate'] == 'AND' and circuit.nodes[2]['gate'] == 'AND'
-        for circuit in results
-    )
+        assert circuit.nodes[4]['gate'] != circuit.nodes[5]['gate']
+        assert circuit.nodes[2]['gate'] != circuit.nodes[4]['gate']
+        assert no_collapsable_children(circuit)
 
 
-def test_filter_list_is_still_applied_after_pruning():
-    """filter_list must still run against the (already root-pruned) assignments --
-    passing no_collapsable_children here should remove the non-root collapsable
-    pairs that root-pruning intentionally leaves in place."""
+def test_filter_list_is_still_applied():
+    """filter_list still runs on the assignments that the pruning keeps."""
     G = nx.DiGraph()
     G.add_edge(0, 2)
     G.add_edge(1, 2)
@@ -1316,20 +1309,140 @@ def test_filter_list_is_still_applied_after_pruning():
     G.add_edge(3, 4)
     G.add_edge(4, 5)
 
-    gate_list = ('AND', 'OR')
-    unfiltered = list(all_gate_assignment(G, gate_list=gate_list))
-    filtered = list(all_gate_assignment(G, filter_list=[no_collapsable_children], gate_list=gate_list))
+    def root_is_nand(graph):
+        return graph.nodes[5]['gate'] == 'NAND'
 
-    assert len(filtered) < len(unfiltered)
-    for circuit in filtered:
-        assert not (circuit.nodes[4]['gate'] == 'AND' and circuit.nodes[2]['gate'] == 'AND')
+    gate_list = ('AND', 'OR', 'NAND', 'NOR')
+    unfiltered = list(all_gate_assignments_without_collapsable_children(G, gate_list=gate_list))
+    filtered = list(all_gate_assignments_without_collapsable_children(G, filter_list=[root_is_nand], gate_list=gate_list))
+
+    assert 0 < len(filtered) < len(unfiltered)
+    assert all(circuit.nodes[5]['gate'] == 'NAND' for circuit in filtered)
+
+
+def _brute_force_assignments(graph, gate_list):
+    # every combination of gates, kept if it passes the two rules all_gate_assignments_without_collapsable_children enforces
+    from itertools import product
+    from rysy_dl.circuit_filters import valid_xor_xnor_fan_in_filter
+    gate_nodes = sorted(n for n in graph if graph.in_degree(n) and graph.nodes[n].get('gate') != 'NOT')
+    found = set()
+    for combo in product(gate_list, repeat=len(gate_nodes)):
+        g = graph.copy()
+        for n in g:
+            if g.in_degree(n) == 0:
+                g.nodes[n]['gate'] = 'src'
+        for n, gate in zip(gate_nodes, combo):
+            g.nodes[n]['gate'] = gate
+        if no_collapsable_children(g) and valid_xor_xnor_fan_in_filter(g):
+            found.add(combo)
+    return gate_nodes, found
+
+
+def _random_dag(rng, num_nodes):
+    G = nx.DiGraph()
+    G.add_nodes_from(range(num_nodes))
+    for child in range(num_nodes):
+        for parent in range(child + 1, num_nodes):
+            if rng.random() < 0.4:
+                G.add_edge(child, parent)
+    return G
+
+
+def test_matches_brute_force_on_random_dags():
+    """all_gate_assignments_without_collapsable_children yields exactly the assignments that pass no_collapsable_children
+    and the XOR fan-in rule -- no fewer, no more, and none twice."""
+    rng = random.Random(11)
+    gate_list = ('AND', 'OR', 'XOR', 'NAND', 'NOR', 'XNOR')
+    for _ in range(40):
+        G = _random_dag(rng, rng.randint(2, 7))
+        gate_nodes, expected = _brute_force_assignments(G, gate_list)
+        produced = [tuple(c.nodes[n]['gate'] for n in gate_nodes)
+                    for c in all_gate_assignments_without_collapsable_children(G.copy(), gate_list=gate_list)]
+        assert len(produced) == len(set(produced))
+        assert set(produced) == expected
+
+
+def test_existing_not_gates_are_left_alone_and_not_enumerated():
+    """A NOT gate already in the graph keeps its type and adds no extra (duplicate)
+    assignments. A NOT between two gates also breaks up a collapsable pair."""
+    G = nx.DiGraph()
+    G.add_edge(0, 2)
+    G.add_edge(1, 2)  # node 2: gate, fan-in 2
+    G.add_edge(2, 3)  # node 3: NOT
+    G.add_edge(3, 5)
+    G.add_edge(4, 5)  # node 5: root, fan-in 2
+    G.nodes[3]['gate'] = 'NOT'
+
+    gate_list = ('AND', 'OR')
+    results = list(all_gate_assignments_without_collapsable_children(G, gate_list=gate_list))
+    combos = [(c.nodes[2]['gate'], c.nodes[5]['gate']) for c in results]
+    assert all(c.nodes[3]['gate'] == 'NOT' for c in results)
+    assert sorted(combos) == sorted(set(combos))
+    assert ('AND', 'AND') in combos  # AND -> NOT -> AND does not collapse
+    assert len(combos) == 4
+
+
+def _two_input_graph():
+    G = nx.DiGraph()
+    G.add_edge(0, 2)
+    G.add_edge(1, 2)
+    return G
+
+
+@pytest.mark.parametrize('where, value', [
+    ('node', ['x']),
+    ('node', {'a': 1}),
+    ('node', {1, 2}),
+    ('node', ('ok', ['not ok'])),  # a tuple holding a list can still change
+    ('edge', ['x']),
+    ('graph', {'a': 1}),
+])
+def test_mutable_attribute_value_raises(where, value):
+    """Yielded circuits are made with graph.copy(), which shares attribute values between
+    copies, so a value that can be changed in place is refused."""
+    G = _two_input_graph()
+    if where == 'node':
+        G.nodes[0]['extra'] = value
+    elif where == 'edge':
+        G.edges[0, 2]['extra'] = value
+    else:
+        G.graph['extra'] = value
+    with pytest.raises(TypeError, match="'extra'.*mutable"):
+        list(all_gate_assignments_without_collapsable_children(G))
+
+
+def test_mutable_gate_list_entry_raises():
+    with pytest.raises(TypeError, match='gate_list entry'):
+        list(all_gate_assignments_without_collapsable_children(_two_input_graph(), gate_list=('AND', ['OR'])))
+
+
+def test_immutable_attribute_values_are_accepted_and_copied_through():
+    G = _two_input_graph()
+    G.nodes[0]['label'] = 'A'
+    G.nodes[1]['extra'] = (1, 'b', None, frozenset({2}), 3.5)
+    G.edges[0, 2]['weight'] = 7
+    G.graph['name'] = 'test'
+    results = list(all_gate_assignments_without_collapsable_children(G, gate_list=('AND', 'OR')))
+    assert len(results) == 2
+    for circuit in results:
+        assert circuit.nodes[0]['label'] == 'A'
+        assert circuit.edges[0, 2]['weight'] == 7
+        assert circuit.graph['name'] == 'test'
+
+
+def test_yielded_circuits_are_independent():
+    """Changing a gate on one yielded circuit must not change any other."""
+    results = list(all_gate_assignments_without_collapsable_children(
+        _two_input_graph(), gate_list=('AND', 'OR')))
+    results[0].nodes[2]['gate'] = 'XOR'
+    assert results[1].nodes[2]['gate'] in ('AND', 'OR')
 
 
 def test_default_gate_list_is_used_when_not_specified():
     G = nx.DiGraph()
     G.add_edge(0, 2)
     G.add_edge(1, 2)
-    results = list(all_gate_assignment(G))
+    results = list(all_gate_assignments_without_collapsable_children(G))
     seen = {circuit.nodes[2]['gate'] for circuit in results}
     assert seen <= {'AND', 'OR', 'XOR', 'NAND', 'NOR'}
     assert len(seen) == 5
@@ -1340,14 +1453,14 @@ def test_isolated_node_graph_labeled_src_and_does_not_raise():
     exactly one circuit, labeled 'src', without error."""
     G = nx.DiGraph()
     G.add_node(0)
-    results = list(all_gate_assignment(G))
+    results = list(all_gate_assignments_without_collapsable_children(G))
     assert len(results) == 1
     assert results[0].nodes[0]['gate'] == 'src'
 
 
-def test_all_gate_assignment_empty_graph_does_not_raise():
+def test_all_gate_assignments_empty_graph_does_not_raise():
     G = nx.DiGraph()
-    results = list(all_gate_assignment(G))
+    results = list(all_gate_assignments_without_collapsable_children(G))
     assert len(results) == 1
     assert len(results[0].nodes) == 0
 
@@ -1637,14 +1750,38 @@ def test_generate_circuits_not_gates_random_can_add_not_gates():
     assert any(netlist.nodes[node]['gate'] == 'NOT' for netlist in db.added for node in netlist.nodes)
 
 
-def test_generate_circuits_not_gates_all_is_not_implemented(capsys):
+# sources 0, 1, 2; gate 3 = (0, 1); gate 4 = (0, 2); the added output 5 = (3, 4).
+# Source 0 has two edges, so there are 2 reduced NOT patterns; 1 and 2 have one edge each.
+_FAN_OUT_DAG = "5 4 0 3 1 3 0 4 2 4"
+
+
+def test_generate_circuits_not_gates_all_adds_every_reduced_pattern():
     db = _RecordingDB()
 
-    result = _run_generate_circuits(["2 0"], db, not_gates='all')
+    result = _run_generate_circuits([_FAN_OUT_DAG], db, not_gates='all')
 
-    assert result == 0
-    assert db.added == []
-    assert "not implemented yet" in capsys.readouterr().out
+    assert result == 2
+    negated = []
+    for netlist in db.added:
+        nots = [n for n in netlist if netlist.nodes[n]['gate'] == 'NOT']
+        negated.append(sorted((0, t) for n in nots for t in netlist.successors(n)))
+        assert not any(netlist.nodes[n]['gate'] == 'NOT' for n in netlist.predecessors(5))
+    # source 0's first edge (to gate 3) is never negated; its second edge is tried both ways
+    assert sorted(negated) == [[], [(0, 4)]]
+
+
+def test_generate_circuits_not_gates_all_multiplies_every_gate_assignment():
+    db = _RecordingDB()
+    assignments = _run_generate_circuits([_FAN_OUT_DAG], _RecordingDB(), gate_assignment='all',
+                                         circuit_filters=())
+
+    result = _run_generate_circuits([_FAN_OUT_DAG], db, gate_assignment='all', not_gates='all',
+                                    circuit_filters=())
+
+    assert assignments > 1
+    assert result == 2 * assignments
+    gates = [tuple(netlist.nodes[n]['gate'] for n in (3, 4, 5)) for netlist in db.added]
+    assert all(count == 2 for count in Counter(gates).values())
 
 
 def test_generate_circuits_and_only_assigns_and_to_every_gate():
@@ -1763,7 +1900,9 @@ def test_generate_circuits_not_quiet_prints_parameter_dump(capsys):
 def test_generate_circuits_always_prints_final_count_even_when_quiet(capsys):
     _run_generate_circuits(["1 0"], _RecordingDB(), quiet=True)
 
-    assert "Generated 1 circuits" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Filter stats for DAG size 1:" in out
+    assert "Generated 1 circuits for DAG size 1" in out
 
 
 def test_generate_circuits_display_stops_early_when_show_netlist_quits(monkeypatch):
@@ -1809,9 +1948,9 @@ def test_generate_circuits_prints_status_every_status_interval_seconds(capsys):
 
     assert result == 5
     out = capsys.readouterr().out
-    assert "Processed 2 graphs (1 graphs/s)" in out
-    assert "Processed 4 graphs (1 graphs/s)" in out
-    assert out.count("Processed") == 2
+    assert "DAG size 1: generated 2 circuits so far (1 circuits/s)" in out
+    assert "DAG size 1: generated 4 circuits so far (1 circuits/s)" in out
+    assert out.count("so far") == 2
 
 
 def test_counting_filter_str_reports_rejection_percentage():
@@ -1830,7 +1969,7 @@ def test_generate_circuits_prints_no_status_before_status_interval_elapses(capsy
     result = _run_generate_circuits(["1 0"] * 5, db, status_interval=3600)
 
     assert result == 5
-    assert "Processed" not in capsys.readouterr().out
+    assert "so far" not in capsys.readouterr().out
 
 
 # ── test reassigning gates on a finished circuit (NOT gates are kept) ───────────────────────
@@ -1867,3 +2006,366 @@ def test_assign_gates_randomly_ensure_diversity_does_not_count_not_gates():
     assign_gates_randomly_ensure_diversity(graph)
 
     assert sorted(graph.nodes[node]['gate'] for node in (3, 4, 5)) == ['AND', 'OR', 'XOR']
+
+
+# ── NAUTY_DAG_COUNTS / plan_dag_sizes / format_plan ──────────────────────────
+
+from rysy_dl.circuit_generator import (  # noqa: E402
+    NAUTY_DAG_COUNTS, plan_dag_sizes, format_plan, generate_circuits_in_ranges,
+)
+
+
+def test_nauty_dag_counts_match_known_values():
+    # OEIS A003087 (acyclic digraphs with n unlabeled nodes); 8 and 9 measured with nauty 2.9.3.
+    assert NAUTY_DAG_COUNTS == {
+        1: 1, 2: 2, 3: 6, 4: 31, 5: 302, 6: 5984, 7: 243668, 8: 20286025, 9: 3424938010,
+    }
+
+
+def _pairs(plan):
+    # every (inputs, gates) pair a plan produces; a DAG of size d gives circuits of d + 1 nodes
+    return {(s, dag_size + 1 - s) for dag_size, low, high in plan for s in range(low, high + 1)}
+
+
+def test_plan_dag_sizes_example_without_cap():
+    plan = plan_dag_sizes((2, 5), (3, 5))
+
+    assert plan == [(4, 2, 2), (5, 2, 3), (6, 2, 4), (7, 3, 5), (8, 4, 5), (9, 5, 5)]
+
+
+def test_plan_dag_sizes_max_nodes_drops_large_circuits():
+    plan = plan_dag_sizes((2, 5), (3, 5), max_nodes=9)
+
+    assert plan == [(4, 2, 2), (5, 2, 3), (6, 2, 4), (7, 3, 5), (8, 4, 5)]
+    assert (5, 5) not in _pairs(plan)
+
+
+@pytest.mark.parametrize('num_sources, num_gates, max_nodes', [
+    ((2, 5), (3, 5), None),
+    ((2, 5), (3, 5), 8),
+    ((1, 1), (1, 7), None),
+    ((3, 3), (4, 4), None),
+    ((2, 7), (1, 7), 9),
+    ((4, 6), (1, 2), 7),
+])
+def test_plan_dag_sizes_produces_exactly_the_requested_pairs_once(num_sources, num_gates, max_nodes):
+    plan = plan_dag_sizes(num_sources, num_gates, max_nodes)
+    expected = {
+        (s, g)
+        for s in range(num_sources[0], num_sources[1] + 1)
+        for g in range(num_gates[0], num_gates[1] + 1)
+        if max_nodes is None or s + g <= max_nodes
+    }
+
+    assert _pairs(plan) == expected
+    dag_sizes = [dag_size for dag_size, _, _ in plan]
+    assert dag_sizes == sorted(set(dag_sizes))  # each DAG size is run once, smallest first
+
+
+def test_plan_dag_sizes_empty_when_max_nodes_too_small():
+    assert plan_dag_sizes((3, 4), (3, 4), max_nodes=5) == []
+
+
+def test_format_plan_lists_pairs_counts_skips_and_total():
+    plan = plan_dag_sizes((2, 5), (3, 5), max_nodes=9)
+
+    text = format_plan(plan, (2, 5), (3, 5), max_nodes=9)
+
+    assert "Plan: 5 nauty run(s) for inputs 2-5, gates 3-5, at most 9 nodes" in text
+    assert "DAG size 6 (7 nodes): (inputs,gates) (2,5) (3,4) (4,3) -- 5,984 DAGs" in text
+    assert "Skipped (more than 9 nodes): (5,5)" in text
+    assert "Total DAGs to examine: 20,536,010" in text
+
+
+def test_format_plan_marks_total_as_a_lower_bound_for_unknown_sizes():
+    text = format_plan(plan_dag_sizes((5, 5), (5, 6)), (5, 5), (5, 6))
+
+    assert "DAG size 10 (11 nodes): (inputs,gates) (5,6) -- unknown" in text
+    assert "Total DAGs to examine: at least 3,424,938,010" in text
+
+
+# ── generate_circuits_in_ranges ──────────────────────────────────────────────
+
+def _run_in_ranges(lines_by_size, db, **overrides):
+    """Run generate_circuits_in_ranges with nauty stubbed: a run of DAG size d yields
+    lines_by_size.get(d, []). Returns (result, list of DAG sizes nauty was asked for)."""
+    requested = []
+
+    def fake_nauty(dag_size, nauty_dir=None):
+        requested.append(dag_size)
+        return iter(lines_by_size.get(dag_size, []))
+
+    kwargs = dict(
+        min_num_inputs=0, max_num_inputs=10,
+        min_num_outputs=0, max_num_outputs=10,
+        gate_assignment='and-only',
+        display_circuits=False,
+        output_dir=None,
+        quiet=True,
+    )
+    kwargs.update(overrides)
+    with patch('rysy_dl.circuit_generator.generate_nauty_digraphs', fake_nauty):
+        return generate_circuits_in_ranges(db=db, **kwargs), requested
+
+
+def test_generate_circuits_in_ranges_runs_each_dag_size_once():
+    db = _RecordingDB()
+
+    _, requested = _run_in_ranges({}, db, num_sources=(2, 5), num_gates=(3, 5), max_nodes=9)
+
+    assert requested == [4, 5, 6, 7, 8]
+
+
+def test_generate_circuits_in_ranges_keeps_only_requested_source_counts():
+    # DAG size 2 with nothing connected: "2 0" becomes 2 sources -> 1 gate (inputs 2, gates 1).
+    # DAG size 3: "3 0" is 3 sources -> 1 gate; "3 1 0 1" is 2 sources (0 and 2) -> gates 1 and 3.
+    db = _RecordingDB()
+    lines = {2: ["2 0"], 3: ["3 0", "3 1 0 1"]}
+
+    total, requested = _run_in_ranges(lines, db, num_sources=(2, 2), num_gates=(1, 2))
+
+    assert requested == [2, 3]
+    assert total == 2
+    source_counts = sorted(sum(1 for v in g if g.in_degree(v) == 0) for g in db.added)
+    gate_counts = sorted(sum(1 for v in g if g.in_degree(v) > 0) for g in db.added)
+    assert source_counts == [2, 2] and gate_counts == [1, 2]
+
+
+def test_generate_circuits_in_ranges_prints_plan_and_total(capsys):
+    _run_in_ranges({2: ["2 0"]}, _RecordingDB(), num_sources=(2, 2), num_gates=(1, 1))
+
+    out = capsys.readouterr().out
+    assert "Plan: 1 nauty run(s) for inputs 2-2, gates 1-1" in out
+    assert "Total DAGs to examine: 2" in out
+    assert "Generated 1 circuits in total" in out
+
+
+def test_generate_circuits_in_ranges_empty_plan_raises():
+    with pytest.raises(ValueError, match="No circuits have inputs 3-4 and gates 3-4 with at most 5 nodes"):
+        _run_in_ranges({}, _RecordingDB(), num_sources=(3, 4), num_gates=(3, 4), max_nodes=5)
+
+
+def test_generate_circuits_in_ranges_stops_all_sizes_when_user_quits(monkeypatch):
+    mock_display = MagicMock()
+    mock_display.show_netlist.return_value = True  # the user presses 'q' on the first circuit
+    monkeypatch.setattr(rysy_dl, 'circuit_generator_display', mock_display, raising=False)
+    monkeypatch.setitem(sys.modules, 'rysy_dl.circuit_generator_display', mock_display)
+    db = _RecordingDB()
+
+    total, requested = _run_in_ranges({2: ["2 0"], 3: ["3 0"]}, db,
+                                      num_sources=(2, 3), num_gates=(1, 1), display_circuits=True)
+
+    assert requested == [2]  # never moved on to DAG size 3
+    assert total == 1
+
+
+# ── test all_reduced_source_nots ─────────────────────────────────────────────
+
+from itertools import product as _product  # noqa: E402
+from rysy_dl.circuit_generator import all_reduced_source_nots  # noqa: E402
+from rysy_dl import circuit_filters as _cf  # noqa: E402
+
+
+def _negated_edges(circuit):
+    # {(source, gate)} for every source edge that goes through a NOT gate
+    return {(src, target)
+            for node, gate in circuit.nodes(data='gate') if gate == 'NOT'
+            for src in circuit.predecessors(node)
+            for target in circuit.successors(node)}
+
+
+def _with_pattern(graph, pattern):
+    # a copy of `graph` with NOTs on the source edges in `pattern` ({source: tuple of bools})
+    circuit = graph.copy()
+    for source, sequence in pattern.items():
+        _not_node_inserter(circuit, source, sequence)
+    return circuit
+
+
+def _fan_out_graph():
+    # A feeds 3 gates, B feeds 2, C feeds 1: 2**2 * 2**1 * 2**0 = 8 reduced patterns of 2**6 = 64
+    G = nx.DiGraph()
+    G.add_edges_from([(0, 3), (1, 3), (0, 4), (2, 4), (0, 5), (1, 5), (3, 6), (4, 6), (5, 6)])
+    for node, gate in {0: 'src', 1: 'src', 2: 'src', 3: 'AND', 4: 'OR', 5: 'XOR', 6: 'NAND'}.items():
+        G.nodes[node]['gate'] = gate
+    return G
+
+
+def test_reduced_nots_count_is_two_to_the_edges_minus_sources():
+    assert len(list(all_reduced_source_nots(_fan_out_graph()))) == 8
+
+
+def test_reduced_nots_never_negate_a_sources_first_edge():
+    G = _fan_out_graph()
+    first_edges = {(s, next(iter(G.successors(s)))) for s in (0, 1, 2)}
+    for circuit in all_reduced_source_nots(G):
+        assert not (_negated_edges(circuit) & first_edges)
+        assert all(circuit.has_edge(*edge) for edge in first_edges)
+
+
+def test_reduced_nots_are_all_different_and_cover_every_family():
+    """Every one of the 2**6 full patterns, after flipping each source whose first edge is
+    negated, is exactly one of the reduced patterns -- and no reduced pattern repeats."""
+    G = _fan_out_graph()
+    produced = [frozenset(_negated_edges(c)) for c in all_reduced_source_nots(G)]
+    assert len(produced) == len(set(produced))
+
+    successors = {s: list(G.successors(s)) for s in (0, 1, 2)}
+    families = set()
+    for bits in _product((False, True), repeat=6):
+        negated = set()
+        i = 0
+        for s, targets in successors.items():
+            seq = bits[i:i + len(targets)]
+            i += len(targets)
+            if seq[0]:  # rename this input: flip every one of its edges
+                seq = tuple(not b for b in seq)
+            negated |= {(s, t) for t, b in zip(targets, seq) if b}
+        families.add(frozenset(negated))
+    assert families == set(produced)
+
+
+def test_reduced_nots_one_not_gate_per_source_and_graph_unchanged():
+    G = _fan_out_graph()
+    before = (sorted(G.nodes(data=True)), sorted(G.edges()))
+    for circuit in all_reduced_source_nots(G):
+        nots = [n for n, gate in circuit.nodes(data='gate') if gate == 'NOT']
+        assert len({next(iter(circuit.predecessors(n))) for n in nots}) == len(nots)
+    assert (sorted(G.nodes(data=True)), sorted(G.edges())) == before
+
+
+def test_reduced_nots_single_edge_sources_never_get_a_not():
+    G = nx.DiGraph()
+    G.add_edges_from([(0, 2), (1, 2)])
+    G.nodes[2]['gate'] = 'AND'
+    results = list(all_reduced_source_nots(G))
+    assert len(results) == 1
+    assert not _negated_edges(results[0])
+
+
+def test_reduced_nots_rejects_a_graph_that_already_has_nots():
+    G = _fan_out_graph()
+    _not_node_inserter(G, 0, (False, True, False))
+    with pytest.raises(ValueError, match='no NOT gates yet'):
+        list(all_reduced_source_nots(G))
+
+
+def _random_gated_circuit(rng):
+    # 2-3 sources, 2-4 gates, each with 2-3 inputs, then one output gate for every dangling node
+    G = nx.DiGraph()
+    num_sources = rng.randint(2, 3)
+    nodes = list(range(num_sources))
+    G.add_nodes_from(nodes)
+    for gate in range(num_sources, num_sources + rng.randint(2, 4)):
+        for child in rng.sample(nodes, min(len(nodes), rng.randint(2, 3))):
+            G.add_edge(child, gate)
+        nodes.append(gate)
+    dangling = [n for n in nodes if G.out_degree(n) == 0]
+    if len(dangling) == 1:
+        dangling.append(rng.choice([n for n in nodes if n != dangling[0]]))
+    out = len(nodes)
+    for n in dangling:
+        G.add_edge(n, out)
+    for n in G:
+        if G.in_degree(n) == 0:
+            G.nodes[n]['gate'] = 'src'
+        else:
+            choices = ['AND', 'OR', 'NAND', 'NOR'] + (['XOR', 'XNOR'] if G.in_degree(n) == 2 else [])
+            G.nodes[n]['gate'] = rng.choice(choices)
+    return G
+
+
+def test_after_not_filters_give_every_pattern_the_same_answer_as_its_reduced_twin():
+    """The reason all_reduced_source_nots may skip patterns: flipping every edge of a source
+    (renaming A to A') never changes these filters' answers."""
+    rng = random.Random(4)
+    filters = [_cf.no_constant_subexpressions, _cf.no_visible_absorption, _cf.no_absorption,
+               _cf.every_input_affects_output]
+    checked = 0
+    for _ in range(60):
+        G = _random_gated_circuit(rng)
+        successors = {s: list(G.successors(s)) for s in G if G.in_degree(s) == 0}
+        num_edges = sum(len(t) for t in successors.values())
+        for bits in _product((False, True), repeat=num_edges):
+            pattern, twin, i = {}, {}, 0
+            for s, targets in successors.items():
+                seq = bits[i:i + len(targets)]
+                i += len(targets)
+                pattern[s] = seq
+                twin[s] = tuple(not b for b in seq) if seq[0] else seq
+            full, reduced = _with_pattern(G, pattern), _with_pattern(G, twin)
+            assert [f(full) for f in filters] == [f(reduced) for f in filters]
+            checked += 1
+    assert checked > 1000
+
+
+# ── test circuit_filters in generate_circuits ─────────────────────────────────────────────
+
+
+def test_generate_circuits_all_gates_applies_default_filters():
+    db = _RecordingDB()
+    unfiltered = _run_generate_circuits([_FAN_OUT_DAG], _RecordingDB(), gate_assignment='all',
+                                        not_gates='all', circuit_filters=())
+
+    result = _run_generate_circuits([_FAN_OUT_DAG], db, gate_assignment='all', not_gates='all')
+
+    assert 0 < result < unfiltered
+    for netlist in db.added:
+        assert _cf.no_constant_subexpressions(netlist)
+        assert _cf.no_visible_absorption(netlist)
+        assert _cf.every_input_affects_output(netlist)
+
+
+# gate 2 = (0, 1), gate 3 = (0, 2): as and-only, A*(A*B), which no_visible_absorption rejects
+_REPEATED_INPUT_DAG = "4 4 0 2 1 2 0 3 2 3"
+
+
+def test_generate_circuits_and_only_applies_no_filters_by_default():
+    # an and-only circuit is a structure for later gate assignment, not a finished circuit
+    from rysy_dl.circuit_generator import DEFAULT_ALL_GATE_ASSIGNMENT_FILTERS
+    assert _run_generate_circuits([_REPEATED_INPUT_DAG], _RecordingDB(),
+                                  circuit_filters=DEFAULT_ALL_GATE_ASSIGNMENT_FILTERS) == 0
+
+    assert _run_generate_circuits([_REPEATED_INPUT_DAG], _RecordingDB()) == 1
+
+
+def _spy(name, seen):
+    def spy(graph):
+        seen.append(any(gate == 'NOT' for _, gate in graph.nodes(data='gate')))
+        return True
+    spy.__name__ = name
+    return spy
+
+
+@pytest.mark.parametrize('not_gates', ['all', 'random'])
+def test_generate_circuits_gate_only_filters_run_before_nots_and_others_after(monkeypatch, not_gates):
+    before_seen, after_seen = [], []
+    gate_only, other = _spy('gate_only', before_seen), _spy('other', after_seen)
+    monkeypatch.setattr('rysy_dl.circuit_generator.GATE_ONLY_FILTERS', frozenset({gate_only}))
+    random.seed(2)
+
+    _run_generate_circuits([_FAN_OUT_DAG] * 20, _RecordingDB(), gate_assignment='all',
+                           not_gates=not_gates, circuit_filters=(gate_only, other))
+
+    assert before_seen and not any(before_seen)  # never saw a NOT
+    assert any(after_seen)                       # saw circuits with NOTs
+
+
+def test_generate_circuits_filter_stats_include_circuit_filters(capsys):
+    _run_generate_circuits([_FAN_OUT_DAG], _RecordingDB(), gate_assignment='all', not_gates='all')
+
+    out = capsys.readouterr().out
+    assert 'no_constant_subexpressions:' in out
+    assert 'no_visible_absorption:' in out
+    assert 'every_input_affects_output:' in out
+
+
+def test_generate_circuits_saved_count_excludes_rejected_circuits():
+    def reject_all(graph):
+        return False
+    db = _RecordingDB()
+
+    result = _run_generate_circuits([_FAN_OUT_DAG], db, gate_assignment='all', circuit_filters=(reject_all,))
+
+    assert result == 0
+    assert db.added == []

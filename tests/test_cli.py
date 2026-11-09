@@ -136,22 +136,22 @@ def test_coerce_str_passthrough():
 
 def test_apply_config_file_cli_overrides_file(tmp_path):
     cfg = tmp_path / "params.cfg"
-    cfg.write_text("dag_size: 9\n")
-    args = make_args(config=str(cfg), dag_size=4, db_name='foo.db')
+    cfg.write_text("num_gates: 3-5\n")
+    args = make_args(config=str(cfg), num_gates=(4, 4), db_name='foo.db')
 
     cli.apply_config_file(args, cli.GENERATE_CIRCUITS_DEFAULTS, cli.GENERATE_CIRCUITS_TYPES, positional=('db_name',))
 
-    assert args.dag_size == 4
+    assert args.num_gates == (4, 4)
 
 
 def test_apply_config_file_fills_from_file_when_cli_unset(tmp_path):
     cfg = tmp_path / "params.cfg"
-    cfg.write_text("dag_size: 9\nmin_fan_in: 3\n")
+    cfg.write_text("num_gates: 3-5\nmin_fan_in: 3\n")
     args = make_args(config=str(cfg), db_name='foo.db')
 
     cli.apply_config_file(args, cli.GENERATE_CIRCUITS_DEFAULTS, cli.GENERATE_CIRCUITS_TYPES, positional=('db_name',))
 
-    assert args.dag_size == 9
+    assert args.num_gates == (3, 5)
     assert args.min_fan_in == 3
 
 
@@ -198,18 +198,20 @@ def test_apply_config_file_warns_on_unrecognized_key(tmp_path, capsys):
 
 def test_apply_config_file_type_coercion(tmp_path):
     cfg = tmp_path / "params.cfg"
-    cfg.write_text("dag_size: 9\nshow_graphs: true\n")
+    cfg.write_text("max_nodes: 9\nshow_graphs: true\nnum_inputs: 3\nnum_gates: 2-5\n")
     args = make_args(config=str(cfg), db_name='foo.db')
 
     cli.apply_config_file(args, cli.GENERATE_CIRCUITS_DEFAULTS, cli.GENERATE_CIRCUITS_TYPES, positional=('db_name',))
 
-    assert args.dag_size == 9 and isinstance(args.dag_size, int)
+    assert args.max_nodes == 9 and isinstance(args.max_nodes, int)
+    assert args.num_inputs == (3, 3)
+    assert args.num_gates == (2, 5)
     assert args.show_graphs is True
 
 
 def test_apply_config_file_bad_value_in_file_exits(tmp_path, capsys):
     cfg = tmp_path / "params.cfg"
-    cfg.write_text("dag_size: nine\n")
+    cfg.write_text("max_nodes: nine\n")
     args = make_args(config=str(cfg), db_name='foo.db')
 
     with pytest.raises(SystemExit) as exc_info:
@@ -259,13 +261,15 @@ def test_cmd_generate_circuits_creates_new_db_and_calls_generate_circuits(tmp_pa
     monkeypatch.setattr(cli.circuit_database, 'CircuitDatabase', lambda p: FakeDB())
 
     calls = {}
-    monkeypatch.setattr(cli, 'generate_circuits', lambda **kw: calls.update(kw))
+    monkeypatch.setattr(cli, 'generate_circuits_in_ranges', lambda **kw: calls.update(kw))
 
-    args = make_args(db_name=str(db_path), dag_size=5, min_fan_in=3)
+    args = make_args(db_name=str(db_path), num_inputs=(2, 5), num_gates=(3, 5), max_nodes=9, min_fan_in=3)
     cli.cmd_generate_circuits(args)
 
     assert created['path'] == str(db_path)
-    assert calls['dag_size'] == 5
+    assert calls['num_sources'] == (2, 5)
+    assert calls['num_gates'] == (3, 5)
+    assert calls['max_nodes'] == 9
     assert calls['min_num_inputs'] == 3
     assert calls['gate_assignment'] == 'random'   # default
     assert calls['not_gates'] == 'none'           # default
@@ -286,7 +290,7 @@ def test_cmd_generate_circuits_overwrite_existing_db(tmp_path, monkeypatch):
     created = []
     monkeypatch.setattr(cli.circuit_database, 'create', lambda p: created.append(p))
     monkeypatch.setattr(cli.circuit_database, 'CircuitDatabase', lambda p: FakeDB())
-    monkeypatch.setattr(cli, 'generate_circuits', lambda **kw: None)
+    monkeypatch.setattr(cli, 'generate_circuits_in_ranges', lambda **kw: None)
 
     args = make_args(db_name=str(db_path))
     cli.cmd_generate_circuits(args)
@@ -302,8 +306,8 @@ def test_cmd_generate_circuits_quit_when_db_exists(tmp_path, monkeypatch, capsys
     monkeypatch.setattr('builtins.input', lambda prompt: 'q')
 
     def fail_if_called(**kw):
-        pytest.fail("generate_circuits should not be called when the user quits")
-    monkeypatch.setattr(cli, 'generate_circuits', fail_if_called)
+        pytest.fail("generate_circuits_in_ranges should not be called when the user quits")
+    monkeypatch.setattr(cli, 'generate_circuits_in_ranges', fail_if_called)
 
     args = make_args(db_name=str(db_path))
     with pytest.raises(SystemExit) as exc_info:
@@ -326,7 +330,7 @@ def test_cmd_generate_circuits_if_exists_insert_skips_prompt(tmp_path, monkeypat
     monkeypatch.setattr(cli.os, 'remove', lambda p: removed.append(p))
     monkeypatch.setattr(cli.circuit_database, 'create', lambda p: None)
     monkeypatch.setattr(cli.circuit_database, 'CircuitDatabase', lambda p: FakeDB())
-    monkeypatch.setattr(cli, 'generate_circuits', lambda **kw: None)
+    monkeypatch.setattr(cli, 'generate_circuits_in_ranges', lambda **kw: None)
 
     args = make_args(db_name=str(db_path), if_exists='insert')
     cli.cmd_generate_circuits(args)
@@ -348,7 +352,7 @@ def test_cmd_generate_circuits_if_exists_overwrite_skips_prompt(tmp_path, monkey
     created = []
     monkeypatch.setattr(cli.circuit_database, 'create', lambda p: created.append(p))
     monkeypatch.setattr(cli.circuit_database, 'CircuitDatabase', lambda p: FakeDB())
-    monkeypatch.setattr(cli, 'generate_circuits', lambda **kw: None)
+    monkeypatch.setattr(cli, 'generate_circuits_in_ranges', lambda **kw: None)
 
     args = make_args(db_name=str(db_path), if_exists='overwrite')
     cli.cmd_generate_circuits(args)
@@ -386,7 +390,7 @@ def test_cmd_generate_circuits_reports_nauty_setup_error(tmp_path, monkeypatch, 
 
     def raise_bad_nauty_dir(**kw):
         raise NotADirectoryError("bad nauty dir")
-    monkeypatch.setattr(cli, 'generate_circuits', raise_bad_nauty_dir)
+    monkeypatch.setattr(cli, 'generate_circuits_in_ranges', raise_bad_nauty_dir)
 
     args = make_args(db_name=str(db_path), nauty_dir='/bad/dir')
 
@@ -431,23 +435,25 @@ def test_cmd_layout_success(tmp_path, monkeypatch, capsys):
 
 def test_main_generate_circuits_merges_config_and_cli(tmp_path, monkeypatch):
     cfg = tmp_path / "params.cfg"
-    cfg.write_text("dag_size: 9\nmin_fan_in: 3\ngate_assignment: all\nstatus_interval: 30\n")
+    cfg.write_text("num_gates: 3-5\nmin_fan_in: 3\ngate_assignment: all\nstatus_interval: 30\n")
     db_path = tmp_path / "circuits.db"
 
     monkeypatch.setattr(cli.circuit_database, 'create', lambda p: None)
     monkeypatch.setattr(cli.circuit_database, 'CircuitDatabase', lambda p: FakeDB())
 
     calls = {}
-    monkeypatch.setattr(cli, 'generate_circuits', lambda **kw: calls.update(kw))
+    monkeypatch.setattr(cli, 'generate_circuits_in_ranges', lambda **kw: calls.update(kw))
 
     monkeypatch.setattr(sys, 'argv', [
         'rysy_dl', 'generate-circuits', str(db_path),
-        '--config', str(cfg), '--dag-size', '4',
+        '--config', str(cfg), '--num-gates', '4', '--num-inputs', '2-3', '--max-nodes', '6',
     ])
 
     cli.main()
 
-    assert calls['dag_size'] == 4              # CLI overrides file
+    assert calls['num_gates'] == (4, 4)         # CLI overrides file
+    assert calls['num_sources'] == (2, 3)
+    assert calls['max_nodes'] == 6
     assert calls['min_num_inputs'] == 3         # from file
     assert calls['gate_assignment'] == 'all'    # from file
     assert calls['status_interval'] == 30.0     # from file
@@ -539,7 +545,7 @@ def test_cmd_generate_circuits_passes_not_gates_through(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.circuit_database, 'create', lambda p: None)
     monkeypatch.setattr(cli.circuit_database, 'CircuitDatabase', lambda p: FakeDB())
     calls = {}
-    monkeypatch.setattr(cli, 'generate_circuits', lambda **kw: calls.update(kw))
+    monkeypatch.setattr(cli, 'generate_circuits_in_ranges', lambda **kw: calls.update(kw))
 
     cli.cmd_generate_circuits(make_args(db_name=str(tmp_path / "c.db"), not_gates='random'))
 
@@ -554,3 +560,76 @@ def test_cmd_generate_circuits_rejects_invalid_not_gates_from_config(tmp_path, c
         cli.cmd_generate_circuits(make_args(db_name=str(tmp_path / "c.db"), config=str(config)))
 
     assert "'not_gates' must be one of" in capsys.readouterr().err
+
+
+# ── --num-inputs / --num-gates / --max-nodes ─────────────────────────────────
+
+@pytest.mark.parametrize('text, expected', [('3', (3, 3)), ('2-5', (2, 5)), ('4-4', (4, 4))])
+def test_int_range_parses_single_values_and_ranges(text, expected):
+    assert cli._int_range(text) == expected
+
+
+@pytest.mark.parametrize('text', ['x', '2-', '5-2', '2-x'])
+def test_int_range_rejects_bad_ranges(text):
+    with pytest.raises(argparse.ArgumentTypeError):
+        cli._int_range(text)
+
+
+def test_apply_config_file_bad_range_in_file_exits(tmp_path, capsys):
+    cfg = tmp_path / "params.cfg"
+    cfg.write_text("num_inputs: 5-2\n")
+    args = make_args(config=str(cfg), db_name='foo.db')
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.apply_config_file(args, cli.GENERATE_CIRCUITS_DEFAULTS, cli.GENERATE_CIRCUITS_TYPES, positional=('db_name',))
+
+    assert exc_info.value.code == 1
+    assert "num_inputs" in capsys.readouterr().err
+
+
+def test_main_rejects_bad_num_inputs_on_command_line(monkeypatch, capsys):
+    monkeypatch.setattr(sys, 'argv', ['rysy_dl', 'generate-circuits', 'foo.db', '--num-inputs', '5-2'])
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+
+    assert exc_info.value.code == 2  # argparse usage error
+    assert "--num-inputs" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('overrides, message', [
+    (dict(num_inputs=(0, 3)), "'num_inputs' must be at least 1"),
+    (dict(num_gates=(0, 3)), "'num_gates' must be at least 1"),
+    (dict(max_nodes=1), "'max_nodes' must be at least 2"),
+])
+def test_cmd_generate_circuits_rejects_out_of_range_sizes(tmp_path, capsys, overrides, message):
+    with pytest.raises(SystemExit) as exc_info:
+        cli.cmd_generate_circuits(make_args(db_name=str(tmp_path / 'c.db'), **overrides))
+
+    assert exc_info.value.code == 1
+    assert message in capsys.readouterr().err
+
+
+def test_cmd_generate_circuits_rejects_empty_plan_before_touching_db(tmp_path, monkeypatch, capsys):
+    # 3+ inputs and 3+ gates can't fit in 5 nodes.
+    def fail(*args, **kwargs):
+        pytest.fail("the database should not be created")
+    monkeypatch.setattr(cli.circuit_database, 'create', fail)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.cmd_generate_circuits(make_args(
+            db_name=str(tmp_path / 'c.db'), num_inputs=(3, 4), num_gates=(3, 4), max_nodes=5))
+
+    assert exc_info.value.code == 1
+    assert "no circuits have 3-4 inputs and 3-4 gates with at most 5 nodes" in capsys.readouterr().err
+    assert not (tmp_path / 'c.db').exists()
+
+
+def test_cmd_generate_circuits_dry_run_passes_ranges_without_db(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(cli, 'generate_circuits_in_ranges', lambda **kw: calls.update(kw))
+
+    cli.cmd_generate_circuits(make_args(dry_run=True, num_inputs=(2, 3), num_gates=(3, 3)))
+
+    assert calls['db'] is None and calls['dry_run'] is True
+    assert calls['num_sources'] == (2, 3) and calls['num_gates'] == (3, 3)

@@ -26,7 +26,6 @@ Common workflow:
 :copyright: 2026, Zachary and Andrew Kurmas
 """
 
-import copy
 import os
 import random
 import shlex
@@ -44,7 +43,13 @@ from .graph_filters import (
     non_source_in_degrees_in_range,
     non_sink_out_degrees_in_range,
 )
-from .circuit_filters import no_collapsable_children, _FORBIDDEN_CHILD_GATE
+from .circuit_filters import (
+    _FORBIDDEN_CHILD_GATE,
+    GATE_ONLY_FILTERS,
+    every_input_affects_output,
+    no_constant_subexpressions,
+    no_visible_absorption,
+)
 
 logger = get_logger(__name__)
 
@@ -416,66 +421,112 @@ def assign_gates_randomly(netlist, ensure_diversity=True, gate_list=None):
     _apply_gate_assignment(netlist, gates_tuple, gate_list)
 
 
-def all_gate_assignment(
+def _require_immutable_attributes(graph, gate_list=()):
+    """
+    Raise TypeError if any attribute value of `graph` (graph, node, or edge attributes) or any
+    entry of `gate_list` can be changed in place.
+
+    all_gate_assignments_without_collapsable_children yields graph.copy(), which gives each
+    copy its own attribute dicts but shares the values in them. That is only safe if no value
+    can be modified in place: otherwise changing it in one circuit would change it in all.
+
+    "Immutable" is tested with hash(): Python's built-in immutable types (str, int, float,
+    tuple of immutables, frozenset, None) are hashable, and its mutable ones (list, dict,
+    set) are not. A user-defined class is hashable by default even if it is mutable, so such
+    a value would get past this check.
+    """
+    named_values = [(f"graph attribute {name!r}", value) for name, value in graph.graph.items()]
+    for node, data in graph.nodes(data=True):
+        named_values += [(f"attribute {name!r} of node {node!r}", value) for name, value in data.items()]
+    for tail, head, data in graph.edges(data=True):
+        named_values += [(f"attribute {name!r} of edge {(tail, head)!r}", value) for name, value in data.items()]
+    named_values += [("gate_list entry", gate) for gate in gate_list]
+
+    for where, value in named_values:
+        try:
+            hash(value)
+        except TypeError:
+            raise TypeError(
+                f"{where} holds a mutable {type(value).__name__} ({value!r}); the circuits "
+                "yielded by graph.copy() would share it, so changing it in one would change all"
+            ) from None
+
+
+def all_gate_assignments_without_collapsable_children(
     graph, filter_list=(), gate_list=("AND", "OR", "XOR", "NAND", "NOR")
 ):
     """
-    Returns an iterator that yields all possible gate assignments for a single graph
+    Returns an iterator that yields every gate assignment for a single graph that has no
+    collapsable children (see circuit_filters.no_collapsable_children) and no XOR/XNOR gate
+    without exactly 2 inputs. Each such assignment is yielded exactly once.
+
+    Gates are chosen from the output toward the inputs, so every gate's parents already have
+    their types when the gate is reached, and the types they forbid (AND under AND or NAND,
+    OR under OR or NOR) are never tried. No parent forbids NAND or NOR, so every gate always
+    has a choice and every partial assignment leads to at least one complete one: the work
+    is proportional to the number of assignments produced, not to len(gate_list) ** gates.
+
+    Source nodes are labeled 'src'. NOT gates already in the graph are left alone.
+    The gates are assigned to `graph` in place; each yielded circuit is a copy.
+
+    Raises TypeError (when iteration starts) if an attribute value of `graph` or an entry of
+    `gate_list` is mutable; see _require_immutable_attributes.
+
     :param graph: A networkx DiGraph representing a DAG.
-    :param filter_list: A list of filter functions to apply to each generated circuit.
-    :param gate_list: A list of gate types to assign to the non-source nodes in the graph.
-    :returns: A list of networkx DiGraphs, each representing a unique circuit"""
+    :param filter_list: Further filter functions; only assignments that pass all of them are yielded.
+    :param gate_list: The gate types to assign to the non-source nodes in the graph.
+    :returns: An iterator of networkx DiGraphs, each representing a unique circuit"""
 
     # Note: The use of tuples above is intentional: We assume this function will not mutate filter_list or gate_list.
     # By using tuples, we will get a TypeError if the caller tries to mutate them, which is better than silently allowing it.
 
-    # XOR/XNOR are only defined for 2-input gates, so nodes with fan-in != 2
-    # must draw from the gate list with XOR/XNOR excluded
-    non_xor_indices = [
-        i for i, gate in enumerate(gate_list) if gate not in ("XOR", "XNOR")
+    _require_immutable_attributes(graph, gate_list)
+
+    for node in graph.nodes():
+        if graph.in_degree(node) == 0:
+            graph.nodes[node]["gate"] = "src"
+
+    # output first: every node's parents (its successors) come before it
+    gate_nodes = [
+        node
+        for node in reversed(list(nx.topological_sort(graph)))
+        if graph.in_degree(node) != 0 and not _is_not_gate(graph, node)
     ]
-    # source nodes always get 'src' regardless of gate choice, so only combine over gate nodes
-    gate_nodes = [node for node in sorted(graph.nodes()) if graph.in_degree(node) != 0]
-    base_choices = {
-        node: (
-            list(range(len(gate_list)))
-            if graph.in_degree(node) == 2
-            else non_xor_indices
-        )
-        for node in gate_nodes
-    }
 
-    # The graph has a single output (sink) node. For each gate we could put there,
-    # drop any choice for its immediate children that would trivially collapse into
-    # it (e.g. AND feeding AND, or OR feeding NOR) -- other collapsable pairs
-    # elsewhere in the graph are left for the caller's filter_list to catch.
-    root = next((node for node in gate_nodes if graph.out_degree(node) == 0), None)
-    root_children = list(graph.predecessors(root)) if root is not None else []
+    def allowed_gates(node):
+        # XOR/XNOR are only defined for 2-input gates
+        two_inputs = graph.in_degree(node) == 2
+        forbidden = {
+            _FORBIDDEN_CHILD_GATE.get(graph.nodes[parent]["gate"])
+            for parent in graph.successors(node)
+        }
+        return [
+            gate
+            for gate in gate_list
+            if gate not in forbidden and (two_inputs or gate not in ("XOR", "XNOR"))
+        ]
 
-    # placeholder value when there's no root; never read since it's only used
-    # inside the `if root is not None` branch below
-    for root_gate_index in (base_choices[root] if root is not None else [0]):
-        choices_per_node = dict(base_choices)
-        if root is not None:
-            choices_per_node[root] = [root_gate_index]
-            forbidden_child_gate = _FORBIDDEN_CHILD_GATE.get(gate_list[root_gate_index])
-            if forbidden_child_gate is not None:
-                for child in root_children:
-                    if child in choices_per_node:
-                        choices_per_node[child] = [
-                            i
-                            for i in choices_per_node[child]
-                            if gate_list[i] != forbidden_child_gate
-                        ]
-
-        for combo in product(*(choices_per_node[node] for node in gate_nodes)):
-            # logger.debug(f"Processing gate assignment {combo}")
-            gates_list = [0] * len(graph)
-            for node, gate_index in zip(gate_nodes, combo):
-                gates_list[node] = gate_index
-            _apply_gate_assignment(graph, tuple(gates_list), gate_list)
+    def assign_from(index):
+        if index == len(gate_nodes):
             if filter_helper(graph, filter_list):
-                yield copy.deepcopy(graph)
+                # graph.copy() vs. copy.deepcopy(graph): both build a new graph with its own nodes,
+                # edges, and attribute dicts (graph.graph, each node's dict, each edge's dict), so
+                # adding or removing nodes/edges, or assigning graph.nodes[n]["gate"] = ..., on one
+                # copy never affects another. The difference is the attribute *values*: copy() puts
+                # the same value objects in the new dicts, while deepcopy() recursively copies them
+                # too. That only matters for a mutable value (e.g. a list) changed in place. Every
+                # attribute value here is a string, which can't be changed in place, so copy() is
+                # just as safe -- and about 2.5x faster, since it skips the recursive walk.
+                # _require_immutable_attributes, called above, enforces this: every value in the
+                # yielded copies either came from `graph` (checked) or from `gate_list` (checked).
+                yield graph.copy()
+            return
+        node = gate_nodes[index]
+        for gate in allowed_gates(node):
+            graph.nodes[node]["gate"] = gate
+            yield from assign_from(index + 1)
+
+    yield from assign_from(0)
 
 
 # ── Adding NOT gates ────────────────────────────────────────────────────────────────
@@ -507,31 +558,52 @@ def _not_node_inserter(netlist, source_node, sequence):
             netlist.remove_edge(source_node, successor)
 
 
-def all_possible_not_gates(graph, node):
-    # generates list of all possible combinations of not gates
-    combos = list(product([False, True], repeat=graph.out_degree(node)))
-    graphs_with_nots = []
-    # generates a copy of the graph, adds the nots, then appends it to graphs_with_nots list to be returned
-    for combo in combos:
-        not_graph = copy.deepcopy(graph)
-        _not_node_inserter(graph, node, combo)
-        graphs_with_nots.append(not_graph)
-    return graphs_with_nots
+def all_reduced_source_nots(graph):
+    """
+    Returns an iterator that yields a copy of `graph` with NOT gates inserted on the edges
+    leaving the sources, once for each *reduced* NOT pattern.
 
+    Every NOT pattern P has a twin: the pattern that flips every edge of some source A
+    (A -> A' and A' -> A on each of A's edges). The twin is P with input A renamed A', so
+    every filter that judges what the circuit computes or how it is written -- constants,
+    whether each input matters, absorption -- gives the same answer for both. It is enough
+    to check one pattern from each such family, and the family is identified by which of
+    each source's edges agree with one another. So for each source, its first edge (in
+    graph.successors order) is never negated, and each of its other edges is tried both
+    ways: 2 ** (out_degree - 1) patterns per source, the product of those overall, i.e.
+    2 ** (source edges - sources) instead of 2 ** (source edges). A source with a single
+    edge never gets a NOT.
 
-def all_source_nots(graph):
-    # creates and returns a list of all possible permutations of not gates after sources for a graph
-    graphs_with_nots = []
-    for node in graph.nodes():
-        if graph.in_degree(node) == 0:
-            if len(graphs_with_nots) == 0:
-                graphs_with_nots.extend(all_possible_not_gates(graph, node))
-            else:
-                temp_list = []
-                for not_graph in graphs_with_nots:
-                    temp_list.extend(all_possible_not_gates(not_graph, node))
-                graphs_with_nots.extend(temp_list)
-    return graphs_with_nots
+    Each skipped pattern is a kept one with some inputs renamed, so a caller can recover
+    any of them (e.g. for variety at question time) by flipping every edge of a source.
+
+    As with insert_random_source_edge_nots, each source gets at most one NOT gate, which
+    feeds all of its negated edges. `graph` itself is not modified.
+
+    :param graph: A networkx DiGraph with gates assigned and no NOT gates yet.
+    :returns: An iterator of networkx DiGraphs.
+    :raises ValueError: If `graph` already contains NOT gates.
+    :raises TypeError: If an attribute value of `graph` is mutable (see _require_immutable_attributes).
+    """
+    if any(_is_not_gate(graph, node) for node in graph.nodes()):
+        raise ValueError("all_reduced_source_nots requires a graph that has no NOT gates yet")
+    # each result is a graph.copy(), which shares attribute values between copies
+    _require_immutable_attributes(graph)
+
+    sources = [node for node in graph.nodes() if graph.in_degree(node) == 0]
+    patterns_per_source = [
+        [(False,) + rest for rest in product((False, True), repeat=graph.out_degree(source) - 1)]
+        if graph.out_degree(source) > 0
+        else [()]
+        for source in sources
+    ]
+    for patterns in product(*patterns_per_source):
+        with_nots = graph.copy()
+        # A NOT added for one source changes only that source's edges, so each source's
+        # successors are still in graph.successors order when its pattern is applied.
+        for source, pattern in zip(sources, patterns):
+            _not_node_inserter(with_nots, source, pattern)
+        yield with_nots
 
 
 def insert_random_source_edge_nots(netlist):
@@ -582,8 +654,9 @@ class CountingFilter:
         return f"{self.name}: {self.rejected}/{self.evaluated} ({(self.rejected / self.evaluated)*100:.2f}%) rejected"
 
 
-def _print_filter_stats(filters):
-    print("Filter stats:")
+def _print_filter_stats(filters, dag_size):
+    # Each nauty run (one DAG size) has its own counts; generate_circuits_in_ranges may do several.
+    print(f"Filter stats for DAG size {dag_size}:")
     for f in filters:
         print(f"  {f}")
 
@@ -591,7 +664,34 @@ def _print_filter_stats(filters):
 # ── generate_circuits ────────────────────────────────────────────────────────────────
 
 
-def generate_circuits(
+def generate_circuits(*args, **kwargs):
+    """
+    Generate the circuits built from DAGs of one size. See `_generate_for_dag_size` for the
+    parameters. To generate circuits by number of inputs and gates instead of by DAG size, use
+    `generate_circuits_in_ranges`.
+
+    :returns: The number of circuits generated.
+    """
+    return _generate_for_dag_size(*args, **kwargs)[0]
+
+
+# The filters `generate_circuits` applies when every gate assignment is enumerated
+# (gate_assignment='all') and the caller doesn't choose any. all_gate_assignments_without_collapsable_children
+# already rules out collapsable children and bad XOR fan-in, so neither is listed here.
+# All three run after the NOTs; the two truth-table checks come first, absorption last.
+DEFAULT_ALL_GATE_ASSIGNMENT_FILTERS = (
+    no_constant_subexpressions,
+    every_input_affects_output,
+    no_visible_absorption,
+)
+
+
+def _with_random_source_nots(netlist):
+    insert_random_source_edge_nots(netlist)
+    return netlist
+
+
+def _generate_for_dag_size(
     dag_size,
     db,
     min_num_source,
@@ -608,6 +708,7 @@ def generate_circuits(
     dry_run=False,
     status_interval=10.0,
     not_gates="none",
+    circuit_filters=None,
 ):
     """
     Generate combinatorial circuits and save them to a db.
@@ -616,12 +717,10 @@ def generate_circuits(
     source count and fan-in/fan-out constraints, assigns logic gates, and
     writes each circuit as a PNG image and a pickle file to `output_dir`.
 
-    Note: `dag_size` is not the number of gates, but the total number of nodes in the DAG
-    on which the circuit is based. The number of gates is equal to `dag_size + 1` minus the number of source nodes (input variables)
-    plus the number of inserted NOT gates.
-
-    Processing stops after 10,000 circuits or when all qualifying graphs are
-    exhausted, whichever comes first.
+    Note: `dag_size` is not the number of gates, but the number of nodes in the DAG nauty
+    enumerates. A single output gate is then added (see `_add_single_sink`), so each circuit has
+    inputs + gates = `dag_size` + 1, not counting inserted NOT gates. One run therefore produces
+    every (inputs, gates) pair with that total; `min_num_source`/`max_num_source` choose among them.
 
     :param dag_size: Total number of nodes in each generated DAG.
     :param db: An open `circuit_database.CircuitDatabase` instance that every generated circuit
@@ -652,8 +751,16 @@ def generate_circuits(
                             and the rate since the previous update).
     :param not_gates: ``'none'`` adds no NOT gates; ``'random'`` randomly inserts NOT gates on
                       edges leaving source nodes (see `insert_random_source_edge_nots`);
-                      ``'all'`` is not implemented yet (prints a message and generates nothing).
-    :returns: The number of circuits generated.
+                      ``'all'`` turns each gate assignment into one circuit per reduced NOT
+                      pattern (see `all_reduced_source_nots`): every way of negating source
+                      edges, except patterns that only rename an input (A <-> A').
+    :param circuit_filters: Filters from circuit_filters that every saved circuit must pass.
+                      Those in circuit_filters.GATE_ONLY_FILTERS run on each gate assignment
+                      before NOT gates are added; the rest run on each finished circuit, after
+                      the NOTs. ``None`` (the default) means `DEFAULT_ALL_GATE_ASSIGNMENT_FILTERS`
+                      when `gate_assignment` is ``'all'``, and no filters otherwise (an
+                      ``'and-only'`` circuit, for example, is a structure, not a finished circuit).
+    :returns: ``(n, user_quit)``: the number of circuits generated, and whether the user pressed ``q`` in the interactive display to stop early.
     """
     if not quiet:
         print(
@@ -662,17 +769,13 @@ def generate_circuits(
             f"min_num_outputs={min_num_outputs}, max_num_outputs={max_num_outputs}, "
             f"gate_assignment={gate_assignment}, display_circuits={display_circuits}, output_dir={output_dir}, "
             f"nauty_dir={nauty_dir}, quiet={quiet}, status_interval={status_interval}, "
-            f"not_gates={not_gates}"
+            f"not_gates={not_gates}, circuit_filters={circuit_filters}"
         )
 
     if not_gates not in ("none", "random", "all"):
         raise ValueError(
             f"Invalid not_gates: {not_gates!r} (expected 'none', 'random', or 'all')"
         )
-    if not_gates == "all":
-        print("not_gates='all' is not implemented yet.")
-        return 0
-
     # Building a networkx DiGraph is the most expensive step per DAG, and most DAGs are rejected
     # for having a gate with out-of-range fan-in. So check fan-in on nauty's raw text first, and
     # only build DiGraphs for the DAGs that pass.
@@ -713,6 +816,18 @@ def generate_circuits(
     for f in filters:
         filtered_dags_iter = filter(f, filtered_dags_iter)
 
+    if circuit_filters is None:
+        circuit_filters = DEFAULT_ALL_GATE_ASSIGNMENT_FILTERS if gate_assignment == "all" else ()
+    # Wrapped once, so their counts add up across all DAGs. A NOT added on a source edge can't
+    # change a gate-only filter's answer, so those run first and spare the NOT patterns.
+    before_not_filters = [
+        CountingFilter(f.__name__, f) for f in circuit_filters if f in GATE_ONLY_FILTERS
+    ]
+    after_not_filters = [
+        CountingFilter(f.__name__, f) for f in circuit_filters if f not in GATE_ONLY_FILTERS
+    ]
+    all_counting_filters = [nauty_fan_in_filter] + filters + before_not_filters + after_not_filters
+
     n = 0
     dag_count = 0
     last_status_time = time.monotonic()
@@ -724,10 +839,9 @@ def generate_circuits(
             assign_gates_randomly(raw_digraph)
             netlists_from_digraph = [raw_digraph]
         elif gate_assignment == "all":
-            # all_gate_assignment returns a generator, not a list, so we don't need to store all of its results in memory at once. Instead, we can iterate over it directly below.
-            netlists_from_digraph = all_gate_assignment(
-                raw_digraph, [no_collapsable_children]
-            )
+            # all_gate_assignments_without_collapsable_children returns a generator, not a list, so we don't need to store all of its results in memory at once. Instead, we can iterate over it directly below.
+            # It never produces collapsable children, so the no_collapsable_children filter is no longer needed below.
+            netlists_from_digraph = all_gate_assignments_without_collapsable_children(raw_digraph)
         elif gate_assignment == "and-only":
             assign_all_gates_and(raw_digraph)
             netlists_from_digraph = [raw_digraph]
@@ -736,10 +850,25 @@ def generate_circuits(
                 f"Invalid gate_assignment: {gate_assignment!r} (expected 'random', 'all', or 'and-only')"
             )
 
+        for f in before_not_filters:
+            netlists_from_digraph = filter(f, netlists_from_digraph)
+
+        if not_gates == "all":
+            # Each gate assignment becomes one circuit per reduced NOT pattern. Like
+            # netlists_from_digraph, this is a generator, so circuits are made one at a time.
+            netlists_from_digraph = (
+                with_nots
+                for netlist in netlists_from_digraph
+                for with_nots in all_reduced_source_nots(netlist)
+            )
+        elif not_gates == "random":
+            netlists_from_digraph = map(_with_random_source_nots, netlists_from_digraph)
+
+        for f in after_not_filters:
+            netlists_from_digraph = filter(f, netlists_from_digraph)
+
         for netlist in netlists_from_digraph:
             n += 1
-            if not_gates == "random":
-                insert_random_source_edge_nots(netlist)
             if not dry_run:
                 db.add(netlist)
 
@@ -755,19 +884,141 @@ def generate_circuits(
                 #  show_netlist returns True if the user pressed 'q' to quit early, False otherwise.
                 if circuit_generator_display.show_netlist(netlist):
                     print(" .")
-                    _print_filter_stats([nauty_fan_in_filter] + filters)
-                    return n
+                    _print_filter_stats(all_counting_filters, dag_size)
+                    return n, True
 
             now = time.monotonic()
             if now - last_status_time >= status_interval:
                 print(
-                    f"Processed {n} graphs ({(n - last_status_n) / (now - last_status_time):.0f} graphs/s)"
+                    f"DAG size {dag_size}: generated {n} circuits so far "
+                    f"({(n - last_status_n) / (now - last_status_time):.0f} circuits/s)"
                 )
-                _print_filter_stats([nauty_fan_in_filter] + filters)
+                _print_filter_stats(all_counting_filters, dag_size)
                 last_status_time = now
                 last_status_n = n
 
-    _print_filter_stats([nauty_fan_in_filter] + filters)
-    print(f"Generated {n} circuits ...")
+    _print_filter_stats(all_counting_filters, dag_size)
+    print(f"Generated {n} circuits for DAG size {dag_size}")
 
-    return n
+    return n, False
+
+
+# ── generating by number of inputs and gates ─────────────────────────────────────────
+
+# Number of DAGs (acyclic digraphs, not necessarily connected, up to isomorphism) that
+# `geng N | directg -a` produces for each size N -- i.e., how many DAGs a run of that size has to
+# examine. Measured with nauty 2.9.3; this is OEIS A003087. The 9-node run took about 6 minutes
+# in nauty alone, before any Python filtering.
+NAUTY_DAG_COUNTS = {
+    1: 1,
+    2: 2,
+    3: 6,
+    4: 31,
+    5: 302,
+    6: 5_984,
+    7: 243_668,
+    8: 20_286_025,
+    9: 3_424_938_010,
+}
+
+
+def plan_dag_sizes(num_sources, num_gates, max_nodes=None):
+    """
+    Work out which nauty runs produce every circuit with a number of inputs (sources) in
+    `num_sources` and a number of gates in `num_gates`, both inclusive ``(min, max)`` ranges.
+    Gates include the output gate but not inserted NOT gates. If `max_nodes` is given, circuits
+    with more than that many inputs + gates are left out -- the size of the circuit, not the
+    number of inputs, is what makes enumeration expensive.
+
+    A circuit with s inputs and g gates comes from a DAG of size s + g - 1, and one run of a
+    DAG size yields every (s, g) pair with that total, so each size is run once and limited to
+    the inputs that pair with an allowed number of gates.
+
+    :returns: A list of ``(dag_size, min_sources, max_sources)``, smallest DAG size first.
+    """
+    (min_sources, max_sources), (min_gates, max_gates) = num_sources, num_gates
+    plan = []
+    for total_nodes in range(min_sources + min_gates, max_sources + max_gates + 1):
+        if max_nodes is not None and total_nodes > max_nodes:
+            break
+        low = max(min_sources, total_nodes - max_gates)
+        high = min(max_sources, total_nodes - min_gates)
+        if low <= high:
+            plan.append((total_nodes - 1, low, high))
+    return plan
+
+
+def format_plan(plan, num_sources, num_gates, max_nodes=None):
+    """Describe a `plan_dag_sizes` plan: the (inputs, gates) pairs each nauty run produces, how
+    many DAGs it examines (from `NAUTY_DAG_COUNTS`), the total, and any pairs `max_nodes` left
+    out."""
+    lines = [
+        f"Plan: {len(plan)} nauty run(s) for inputs {num_sources[0]}-{num_sources[1]}, "
+        f"gates {num_gates[0]}-{num_gates[1]}"
+        + (f", at most {max_nodes} nodes" if max_nodes is not None else "")
+    ]
+    total, total_known = 0, True
+    for dag_size, low, high in plan:
+        pairs = " ".join(f"({s},{dag_size + 1 - s})" for s in range(low, high + 1))
+        count = NAUTY_DAG_COUNTS.get(dag_size)
+        if count is None:
+            total_known = False
+            count_text = "unknown (more than 3.4 billion)"
+        else:
+            total += count
+            count_text = f"{count:,} DAGs"
+        lines.append(f"  DAG size {dag_size} ({dag_size + 1} nodes): (inputs,gates) {pairs} -- {count_text}")
+    if max_nodes is not None:
+        skipped = [
+            (s, g)
+            for s in range(num_sources[0], num_sources[1] + 1)
+            for g in range(num_gates[0], num_gates[1] + 1)
+            if s + g > max_nodes
+        ]
+        if skipped:
+            lines.append(
+                f"  Skipped (more than {max_nodes} nodes): " + " ".join(f"({s},{g})" for s, g in skipped)
+            )
+    lines.append(f"  Total DAGs to examine: {'at least ' if not total_known else ''}{total:,}")
+    return "\n".join(lines)
+
+
+def generate_circuits_in_ranges(num_sources, num_gates, db, max_nodes=None, quiet=False, **kwargs):
+    """
+    Generate every circuit whose number of inputs is in `num_sources` and whose number of gates
+    is in `num_gates` (inclusive ``(min, max)`` ranges; gates include the output gate but not
+    inserted NOT gates), leaving out circuits with more than `max_nodes` inputs + gates.
+
+    Prints the plan (see `plan_dag_sizes` / `format_plan`), then runs nauty once per DAG size.
+    The remaining keyword arguments (fan-in/fan-out limits, gate_assignment, not_gates, ...) are
+    passed to `generate_circuits`.
+
+    :returns: The total number of circuits generated.
+    :raises ValueError: If no (inputs, gates) pair satisfies the ranges and `max_nodes`.
+    """
+    plan = plan_dag_sizes(num_sources, num_gates, max_nodes)
+    if not plan:
+        raise ValueError(
+            f"No circuits have inputs {num_sources[0]}-{num_sources[1]} and gates "
+            f"{num_gates[0]}-{num_gates[1]}"
+            + (f" with at most {max_nodes} nodes" if max_nodes is not None else "")
+        )
+    print(format_plan(plan, num_sources, num_gates, max_nodes))
+
+    total = 0
+    for dag_size, min_sources, max_sources in plan:
+        if not quiet:
+            print(f"\n== DAG size {dag_size}: inputs {min_sources}-{max_sources} ==")
+        count, user_quit = _generate_for_dag_size(
+            dag_size=dag_size,
+            db=db,
+            min_num_source=min_sources,
+            max_num_source=max_sources,
+            quiet=quiet,
+            **kwargs,
+        )
+        total += count
+        if user_quit:
+            break
+    print(f"Generated {total} circuits in total")
+    return total

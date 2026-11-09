@@ -13,7 +13,7 @@ import pickle
 import sys
 from . import circuit_database
 from . import circuit_generator_display
-from .circuit_generator import generate_circuits
+from .circuit_generator import generate_circuits_in_ranges, plan_dag_sizes
 from .circuit_analyzer import circuit_to_expression
 from .circuit_layout import layout_circuit
 from .logging_config import PROGRESS
@@ -36,11 +36,23 @@ LOG_LEVELS = {
 }
 
 
+def _int_range(text):
+    """argparse/config type for an inclusive range: "N" (just N) or "MIN-MAX". Returns (MIN, MAX)."""
+    lo, sep, hi = str(text).partition('-')
+    try:
+        low, high = (int(lo), int(hi)) if sep else (int(lo), int(lo))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected an integer or a MIN-MAX range, got {text!r}")
+    if low > high:
+        raise argparse.ArgumentTypeError(f"range {text!r} is empty (MIN is larger than MAX)")
+    return low, high
+
+
 GENERATE_CIRCUITS_DEFAULTS = {
     'db_name': None,
-    'dag_size': 7,
-    'min_input_variables': 2,
-    'max_input_variables': 7,
+    'num_inputs': (2, 4),
+    'num_gates': (2, 4),
+    'max_nodes': None,
     'min_fan_in': 2,
     'max_fan_in': 6,
     'min_fan_out': 1,
@@ -61,9 +73,9 @@ GENERATE_CIRCUITS_CHOICES = {
 }
 
 GENERATE_CIRCUITS_TYPES = {
-    'dag_size': int,
-    'min_input_variables': int,
-    'max_input_variables': int,
+    'num_inputs': _int_range,
+    'num_gates': _int_range,
+    'max_nodes': int,
     'min_fan_in': int,
     'max_fan_in': int,
     'min_fan_out': int,
@@ -125,6 +137,12 @@ def _coerce(name, raw, expected_type, path):
         except ValueError:
             print(f"Error in config file '{path}': '{name}' must be a number, got {raw!r}", file=sys.stderr)
             sys.exit(1)
+    if expected_type is _int_range:
+        try:
+            return _int_range(raw)
+        except argparse.ArgumentTypeError as e:
+            print(f"Error in config file '{path}': '{name}': {e}", file=sys.stderr)
+            sys.exit(1)
     return raw
 
 
@@ -180,28 +198,39 @@ def cmd_generate_circuits(args):
         print(f"Error: 'status_interval' must be greater than 0, got {args.status_interval!r}", file=sys.stderr)
         sys.exit(1)
 
-    if args.dry_run:
-        try:
-            generate_circuits(
-                dag_size=args.dag_size,
-                db=None,
-                min_num_source=args.min_input_variables,
-                max_num_source=args.max_input_variables,
-                min_num_inputs=args.min_fan_in,
-                max_num_inputs=args.max_fan_in,
-                min_num_outputs=args.min_fan_out,
-                max_num_outputs=args.max_fan_out,
-                gate_assignment=args.gate_assignment,
-                not_gates=args.not_gates,
-                display_circuits=args.show_graphs,
-                output_dir=args.output_dir,
-                nauty_dir=args.nauty_dir,
-                dry_run=True,
-                status_interval=args.status_interval,
-            )
-        except (NotADirectoryError, FileNotFoundError, PermissionError) as e:
-            print(f"Error: nauty setup problem: {e}", file=sys.stderr)
+    for name in ('num_inputs', 'num_gates'):
+        if getattr(args, name)[0] < 1:
+            print(f"Error: '{name}' must be at least 1, got {getattr(args, name)!r}", file=sys.stderr)
             sys.exit(1)
+    if args.max_nodes is not None and args.max_nodes < 2:
+        print(f"Error: 'max_nodes' must be at least 2, got {args.max_nodes!r}", file=sys.stderr)
+        sys.exit(1)
+
+    # Check before creating or prompting about the database.
+    if not plan_dag_sizes(args.num_inputs, args.num_gates, args.max_nodes):
+        print(f"Error: no circuits have {args.num_inputs[0]}-{args.num_inputs[1]} inputs and "
+              f"{args.num_gates[0]}-{args.num_gates[1]} gates"
+              + (f" with at most {args.max_nodes} nodes" if args.max_nodes is not None else ""), file=sys.stderr)
+        sys.exit(1)
+
+    run_options = dict(
+        num_sources=args.num_inputs,
+        num_gates=args.num_gates,
+        max_nodes=args.max_nodes,
+        min_num_inputs=args.min_fan_in,
+        max_num_inputs=args.max_fan_in,
+        min_num_outputs=args.min_fan_out,
+        max_num_outputs=args.max_fan_out,
+        gate_assignment=args.gate_assignment,
+        not_gates=args.not_gates,
+        display_circuits=args.show_graphs,
+        output_dir=args.output_dir,
+        nauty_dir=args.nauty_dir,
+        status_interval=args.status_interval,
+    )
+
+    if args.dry_run:
+        _run_generate(db=None, dry_run=True, **run_options)
         return
 
     if os.path.exists(args.db_name):
@@ -226,26 +255,18 @@ def cmd_generate_circuits(args):
     else:
         circuit_database.create(args.db_name)
 
+    with circuit_database.CircuitDatabase(args.db_name) as db:
+        _run_generate(db=db, **run_options)
+
+
+def _run_generate(**options):
     try:
-        with circuit_database.CircuitDatabase(args.db_name) as db:
-            generate_circuits(
-                dag_size=args.dag_size,
-                db=db,
-                min_num_source=args.min_input_variables,
-                max_num_source=args.max_input_variables,
-                min_num_inputs=args.min_fan_in,
-                max_num_inputs=args.max_fan_in,
-                min_num_outputs=args.min_fan_out,
-                max_num_outputs=args.max_fan_out,
-                gate_assignment=args.gate_assignment,
-                not_gates=args.not_gates,
-                display_circuits=args.show_graphs,
-                output_dir=args.output_dir,
-                nauty_dir=args.nauty_dir,
-                status_interval=args.status_interval,
-            )
+        generate_circuits_in_ranges(**options)
     except (NotADirectoryError, FileNotFoundError, PermissionError) as e:
         print(f"Error: nauty setup problem: {e}", file=sys.stderr)
+        sys.exit(1)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -339,11 +360,16 @@ def main():
                                  'May instead be given as "db_name" in --config. Not required with --dry-run.')
     gc_parser.add_argument('--config', type=str, default=None,
                             help='Path to a file of "key: value" parameters, one per line, using the same names '
-                                 'as these options (e.g. "dag_size: 9", "min_fan_in: 3"). Lines starting with "#" '
+                                 'as these options (e.g. "num_gates: 3-5", "min_fan_in: 3"). Lines starting with "#" '
                                  'are ignored. Command-line arguments override values from this file.')
-    gc_parser.add_argument('--dag-size', type=int, default=None, help='Number of nodes in the generated DAGs (gates + inputs, excluding inserted NOT gates) (default: 7)')
-    gc_parser.add_argument('--min-input-variables', type=int, default=None, help='Minimum number of inputs variables (source nodes) (default: 2)')
-    gc_parser.add_argument('--max-input-variables', type=int, default=None, help='Maximum number of input variables (source nodes) (default: 7)')
+    gc_parser.add_argument('--num-inputs', type=_int_range, default=None, metavar='N|MIN-MAX',
+                           help='Number of input variables (source nodes), e.g. 3 or 2-5 (default: 2-4)')
+    gc_parser.add_argument('--num-gates', type=_int_range, default=None, metavar='N|MIN-MAX',
+                           help='Number of gates, including the output gate but not inserted NOT gates, '
+                                'e.g. 4 or 3-5 (default: 3-4)')
+    gc_parser.add_argument('--max-nodes', type=int, default=None,
+                           help='Leave out circuits with more than this many inputs + gates. The circuit size, '
+                                'not the number of inputs, is what makes enumeration expensive (default: no limit)')
     gc_parser.add_argument('--min-fan-in', type=int, default=None, help='Minimum number of inputs for each gate (default: 2)')
     gc_parser.add_argument('--max-fan-in', type=int, default=None, help='Maximum number of inputs for each gate (default: 6)')
     gc_parser.add_argument('--min-fan-out', type=int, default=None, help='Minimum number of outputs for each gate (default: 1)')
@@ -351,7 +377,8 @@ def main():
     gc_parser.add_argument('--gate-assignment', type=str, default=None, choices=['random', 'all', 'and-only'], help='Gate assignment method: random or all (default: random)')
     gc_parser.add_argument('--not-gates', type=str, default=None, choices=['none', 'random', 'all'],
                             help='NOT gates on edges leaving the inputs: none, random (randomly insert them), '
-                                 'or all (not implemented yet) (default: none)')
+                                 'or all (every reduced NOT pattern for each gate assignment; patterns that only '
+                                 'swap an input for its complement are skipped) (default: none)')
     gc_parser.add_argument('--show-graphs', action=argparse.BooleanOptionalAction, default=None, help='Show generated graphs (default: False)')
     gc_parser.add_argument('--generate-image', action=argparse.BooleanOptionalAction, default=None, help='Write a PNG image for each generated circuit (default: True)')
     gc_parser.add_argument('--output-dir', type=str, default=None, help='Directory to save generated graphs and expressions (default: temp_out)')
