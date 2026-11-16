@@ -295,3 +295,80 @@ def test_upgrade_while_another_program_reads_fails_fast_and_changes_nothing(old_
         reader.close()
 
     assert circuit_database.upgrade(old_db_path) == 2       # works once the reader is gone
+
+
+# ── format version ──────────────────────────────────────────────────────────────────────────
+
+def _user_version(path):
+    conn = sqlite3.connect(path)
+    try:
+        return conn.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_new_database_is_marked_with_current_format(tmp_path):
+    path = str(tmp_path / "new.sqlite")
+    circuit_database.create(path)
+    assert _user_version(path) == circuit_database.FORMAT_VERSION
+
+
+def test_opening_old_format_says_to_upgrade(old_db_path):
+    for read_only in (True, False):
+        with pytest.raises(ValueError, match="rysy_dl upgrade-db"):
+            CircuitDatabase(old_db_path, read_only=read_only)
+
+
+def test_opening_newer_format_says_to_upgrade_rysy_dl(tmp_path):
+    path = str(tmp_path / "new.sqlite")
+    circuit_database.create(path)
+    conn = sqlite3.connect(path)
+    conn.execute(f"PRAGMA user_version = {circuit_database.FORMAT_VERSION + 1}")
+    conn.commit()
+    conn.close()
+    with pytest.raises(ValueError, match="newer"):
+        CircuitDatabase(path, read_only=True)
+    with pytest.raises(ValueError, match="newer"):
+        circuit_database.upgrade(path)
+
+
+def test_upgrade_marks_database_with_current_format(old_db_path):
+    circuit_database.upgrade(old_db_path)
+    assert _user_version(old_db_path) == circuit_database.FORMAT_VERSION
+
+
+def test_upgrade_keeps_graphs_identical(old_db_path):
+    before = [_and_tree(3), _with_source_nots()]
+    circuit_database.upgrade(old_db_path)
+    with CircuitDatabase(old_db_path, read_only=True) as db:
+        after = [record['graph'] for record in db.query()]
+    for a, b in zip(after, before):
+        assert list(a.nodes(data=True)) == list(b.nodes(data=True))
+        assert list(a.edges()) == list(b.edges())
+
+
+def test_upgrade_converts_graphs_when_gate_counts_are_already_split(old_db_path):
+    # The state of databases upgraded before the compact encoding: new columns, pickled graphs.
+    conn = sqlite3.connect(old_db_path)
+    conn.execute("ALTER TABLE circuits RENAME COLUMN num_gates TO num_gates_total")
+    conn.execute("ALTER TABLE circuits ADD COLUMN num_gates_core INTEGER NOT NULL DEFAULT 0")
+    conn.execute("UPDATE circuits SET num_gates_core = num_gates_total - (id = 2) * 2")
+    conn.commit()
+    conn.close()
+
+    assert circuit_database.upgrade(old_db_path) == 2
+    with CircuitDatabase(old_db_path, read_only=True) as db:
+        tree, with_nots = db.query()
+    assert (tree['num_gates_core'], tree['num_gates_total']) == (1, 1)
+    assert (with_nots['num_gates_core'], with_nots['num_gates_total']) == (3, 5)
+
+
+def test_graphs_are_stored_compactly(tmp_path):
+    path = str(tmp_path / "new.sqlite")
+    circuit_database.create(path)
+    with CircuitDatabase(path) as db:
+        db.add(_with_source_nots())
+    conn = sqlite3.connect(path)
+    (blob,) = conn.execute("SELECT graph FROM circuits").fetchone()
+    conn.close()
+    assert blob == circuit_database.circuit_to_bytes(_with_source_nots())

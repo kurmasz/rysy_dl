@@ -66,9 +66,7 @@ scoring the same circuits)::
 
 import argparse
 import json
-import pickle
 import random
-import sqlite3
 import statistics
 import sys
 
@@ -77,8 +75,7 @@ import schemdraw.elements as elm
 
 from .circuit_layout import (_output_height, _wire_paths, assign_source_labels,
                              build_layout)
-from .circuit_serialization import serializable_to_circuit
-from .db import resolve_db_path
+from .circuit_database import CircuitDatabase
 
 # Positions are in drawing units of order 1, so anything below this is
 # floating-point noise rather than a real gap, bend, or overlap.
@@ -283,19 +280,16 @@ def sample_circuits(db_path, limit, seed):
     memory just to throw most of it away; the same (limit, seed) always selects
     the same circuits, which is what makes two runs comparable.
     """
-    connection = sqlite3.connect(resolve_db_path(db_path))
-    ids = [row[0] for row in connection.execute("SELECT id FROM circuits ORDER BY id")]
-    if limit and limit < len(ids):
-        ids = sorted(random.Random(seed).sample(ids, limit))
+    with CircuitDatabase(db_path, read_only=True) as db:
+        ids = [row['id'] for row in db._open_conn().execute("SELECT id FROM circuits ORDER BY id")]
+        if limit and limit < len(ids):
+            ids = sorted(random.Random(seed).sample(ids, limit))
 
-    for circuit_id in ids:
-        (blob,) = connection.execute(
-            "SELECT graph FROM circuits WHERE id = ?", (circuit_id,)).fetchone()
-        data = pickle.loads(blob)
-        graph = serializable_to_circuit(data)
-        if not data.get('labels'):
-            assign_source_labels(graph)
-        yield circuit_id, graph
+        for circuit_id in ids:
+            graph = db.get_entry(circuit_id)['graph']
+            if not any('label' in attrs for _, attrs in graph.nodes(data=True)):
+                assign_source_labels(graph)
+            yield circuit_id, graph
 
 
 def score_corpus(db_path, limit, seed):

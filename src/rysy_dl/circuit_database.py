@@ -14,11 +14,14 @@ Schema:
   max_input_outdegree: int
   gate_type_mask: integer bitmask
   max_shared_subcircuit_depth: int (0 if no gate output is shared; see graph_filters.max_shared_subcircuit_depth)
-  graph: blob
+  graph: blob (see circuit_serialization.circuit_to_bytes)
+
+The file's format version is stored in `PRAGMA user_version` (see `FORMAT_VERSION`); `upgrade`
+converts files written in older formats.
 """
 
 import os
-import pickle
+import pickle   # only for reading graphs written in format version 0, in `upgrade`
 import sqlite3
 from pathlib import Path
 import sys
@@ -29,7 +32,7 @@ import networkx as nx
 from . import graph_filters
 
 from .graph_analyzers import num_sources_and_gates
-from .circuit_serialization import circuit_to_serializable, serializable_to_circuit
+from .circuit_serialization import bytes_to_circuit, circuit_to_bytes, serializable_to_circuit
 from .db import DEFAULT_DB_PATH, resolve_db_path
 from .logging_config import get_logger
 
@@ -39,6 +42,12 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 TABLE_NAME = 'circuits'
+
+# The database format this code reads and writes, stored in the file's PRAGMA user_version:
+#   0: graphs pickled as circuit_serialization.circuit_to_serializable dicts
+#   1: graphs encoded with circuit_serialization.circuit_to_bytes
+# `upgrade` converts older files.
+FORMAT_VERSION = 1
 
 # One bit per gate type that can appear in a circuit's 'gate' node attribute.
 # 'src' (source/input nodes) is deliberately excluded -- it isn't a logic gate,
@@ -153,15 +162,34 @@ def stat_filter_where(**filters):
 def row_to_record(row):
     """
     Convert a `sqlite3.Row` (or any mapping with the schema's column names) into a plain dict
-    whose `graph` value is a reconstructed networkx DiGraph rather than a pickled blob.
+    whose `graph` value is a reconstructed networkx DiGraph rather than an encoded blob.
 
     :param row: A row from the `circuits` table, with column access by name (e.g. `row['graph']`).
     :returns: A dict with keys id, num_gates_core, num_gates_total, num_inputs, depth, max_indegree, max_gate_outdegree,
               max_input_outdegree, gate_type_mask, max_shared_subcircuit_depth, and graph (a networkx DiGraph).
     """
     record = {col: row[col] for col in ('id',) + _STAT_COLUMNS}
-    record['graph'] = serializable_to_circuit(pickle.loads(row['graph']))
+    record['graph'] = bytes_to_circuit(row['graph'])
     return record
+
+
+def _create_schema(conn):
+    """Create the circuits table if the file doesn't have one yet, marking a new file with FORMAT_VERSION."""
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (TABLE_NAME,)).fetchone()
+    if not exists:
+        conn.execute(SCHEMA)
+        conn.execute(f"PRAGMA user_version = {FORMAT_VERSION}")
+    conn.commit()
+
+
+def _format_error(db_path, version):
+    """The error for a database whose format version isn't FORMAT_VERSION."""
+    if version < FORMAT_VERSION:
+        return ValueError(f"{db_path} uses an older database format (version {version}). "
+                          f"Convert it with: rysy_dl upgrade-db {db_path}")
+    return ValueError(f"{db_path} uses database format version {version}, which is newer than this "
+                      f"version of rysy_dl supports ({FORMAT_VERSION}). Upgrade rysy_dl to read it.")
 
 
 class CircuitDatabase:
@@ -212,6 +240,7 @@ class CircuitDatabase:
                            True when `db_path` is omitted (the packaged database is only meant to be
                            queried) and False otherwise.
         :raises FileNotFoundError: If `db_path` doesn't exist.
+        :raises ValueError: If the database is in an older or newer format (see `upgrade`).
         """
         if read_only is None:
             read_only = db_path is None
@@ -228,8 +257,12 @@ class CircuitDatabase:
             self._conn = sqlite3.connect(f"{Path(db_path).resolve().as_uri()}?mode=ro", uri=True)
         else:
             self._conn = sqlite3.connect(db_path)
-            self._conn.execute(SCHEMA)   # Create the table if it isn't in this file yet.
-            self._conn.commit()
+            _create_schema(self._conn)
+        version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if version != FORMAT_VERSION:
+            self._conn.close()
+            self._conn = None
+            raise _format_error(db_path, version)
         self._conn.row_factory = sqlite3.Row
 
     @property
@@ -263,9 +296,8 @@ class CircuitDatabase:
         """
         Add a circuit, computing all schema columns from `graph`.
 
-        The graph itself is not pickled directly; instead `circuit_serialization.circuit_to_serializable`
-        is used to extract only what's needed to recreate it, and that (smaller) structure is what
-        gets pickled into the `graph` blob column. `row_to_record` reverses this when reading rows back.
+        The graph is stored in the `graph` blob column in the compact format of
+        `circuit_serialization.circuit_to_bytes`; `row_to_record` reverses this when reading rows back.
 
         The insert is not necessarily committed immediately -- see the `commit_every` constructor
         argument. Call `commit()` directly if you need this row durable right away.
@@ -274,7 +306,7 @@ class CircuitDatabase:
         :returns: The `id` of the newly inserted row.
         """
         stats = circuit_stats(netlist)
-        blob = pickle.dumps(circuit_to_serializable(netlist), protocol=pickle.HIGHEST_PROTOCOL)
+        blob = circuit_to_bytes(netlist)
 
         columns = _STAT_COLUMNS + ('graph',)
         placeholders = ', '.join('?' for _ in columns)
@@ -446,26 +478,30 @@ def create(db_path):
     """
     conn = sqlite3.connect(resolve_db_path(db_path))
     try:
-        conn.execute(SCHEMA)
-        conn.commit()
+        _create_schema(conn)
     finally:
         conn.close()
 
 
 def upgrade(db_path):
     """
-    Bring an existing circuit database up to the current schema, in place.
+    Bring an existing circuit database up to the current format (`FORMAT_VERSION`), in place.
 
-    The only change so far: the old `num_gates` column (which counted NOT gates) becomes
-    `num_gates_total`, and a new `num_gates_core` column counts every gate except NOT gates,
-    computed from each stored graph. The upgrade runs in a single transaction, so a failure
-    leaves the file unchanged. Upgrading a database that is already current does nothing.
+    The changes so far:
+      * The old `num_gates` column (which counted NOT gates) becomes `num_gates_total`, and a new
+        `num_gates_core` column counts every gate except NOT gates, computed from each stored graph.
+      * Graphs pickled as `circuit_to_serializable` dicts (format version 0) are re-encoded with
+        `circuit_serialization.circuit_to_bytes` (version 1), about a fifth of the size.
+
+    The upgrade runs in a single transaction, so a failure leaves the file unchanged, and it
+    compacts the file afterwards. Upgrading a database that is already current does nothing.
 
     :param db_path: Path to the sqlite database. A string prefixed with '@' is resolved against
                     the `rysy_dl.db` package directory.
     :returns: The number of circuits upgraded (0 if the database was already current).
     :raises FileNotFoundError: If `db_path` doesn't exist.
-    :raises ValueError: If the file doesn't have a recognizable circuits table.
+    :raises ValueError: If the file doesn't have a recognizable circuits table, or is in a format
+                        newer than this code knows.
     :raises RuntimeError: If another program has the database open.
     """
     db_path = resolve_db_path(db_path)
@@ -475,10 +511,14 @@ def upgrade(db_path):
     conn = sqlite3.connect(db_path, isolation_level=None)   # transactions managed explicitly below
     try:
         columns = {row[1] for row in conn.execute(f"PRAGMA table_info({TABLE_NAME})")}
-        if {'num_gates_core', 'num_gates_total'} <= columns:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        has_old_gate_count = 'num_gates' in columns
+        if not has_old_gate_count and not {'num_gates_core', 'num_gates_total'} <= columns:
+            raise ValueError(f"{db_path} has no '{TABLE_NAME}' table to upgrade")
+        if version > FORMAT_VERSION:
+            raise _format_error(db_path, version)
+        if not has_old_gate_count and version == FORMAT_VERSION:
             return 0
-        if 'num_gates' not in columns:
-            raise ValueError(f"{db_path} has no '{TABLE_NAME}' table with a num_gates column to upgrade")
 
         # Take exclusive access up front. Otherwise another program reading the file (such as an open
         # view-circuits window) makes every write wait out the busy timeout, so the upgrade crawls
@@ -491,21 +531,28 @@ def upgrade(db_path):
             raise RuntimeError(f"{db_path} is in use by another program (for example, an open "
                                f"view-circuits window). Close it and try again.") from e
         try:
-            conn.execute(f"ALTER TABLE {TABLE_NAME} RENAME COLUMN num_gates TO num_gates_total")
-            conn.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN num_gates_core INTEGER NOT NULL DEFAULT 0")
+            if has_old_gate_count:
+                conn.execute(f"ALTER TABLE {TABLE_NAME} RENAME COLUMN num_gates TO num_gates_total")
+                conn.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN num_gates_core INTEGER NOT NULL DEFAULT 0")
             updates = []
             for circuit_id, blob in conn.execute(f"SELECT id, graph FROM {TABLE_NAME}"):
-                graph = serializable_to_circuit(pickle.loads(blob))
+                if version == 0:
+                    graph = serializable_to_circuit(pickle.loads(blob))
+                else:
+                    graph = bytes_to_circuit(blob)
                 num_not_gates = sum(1 for _, gate in graph.nodes(data='gate') if gate == 'NOT')
-                updates.append((num_not_gates, circuit_id))
+                updates.append((num_not_gates, circuit_to_bytes(graph), circuit_id))
             conn.executemany(
-                f"UPDATE {TABLE_NAME} SET num_gates_core = num_gates_total - ? WHERE id = ?", updates)
+                f"UPDATE {TABLE_NAME} SET num_gates_core = num_gates_total - ?, graph = ? WHERE id = ?",
+                updates)
+            conn.execute(f"PRAGMA user_version = {FORMAT_VERSION}")
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")
             raise
-        # Filling in the new column lengthens every row, which splits pages and leaves them partly
-        # empty (about 12% larger for enumerate_all_4-7). VACUUM repacks the file.
+        # Rewriting every row leaves pages partly empty (filling in num_gates_core alone made
+        # enumerate_all_4-7 about 12% larger, and shorter graph blobs leave even more gaps).
+        # VACUUM repacks the file.
         conn.execute("VACUUM")
         return len(updates)
     finally:
