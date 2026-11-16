@@ -19,6 +19,7 @@ Schema:
 import os
 import pickle
 import sqlite3
+import sys
 from typing import Callable, ClassVar, Optional, TYPE_CHECKING
 
 import networkx as nx
@@ -365,7 +366,8 @@ class CircuitDatabase:
             raise ValueError("max_shared_subcircuit_depth and has_shared_subexpressions are mutually exclusive")
         
         if max_shared_subcircuit_depth is None and has_shared_subexpressions is not None:
-            max_shared_subcircuit_depth = 0 if not has_shared_subexpressions else None
+            # True means at least one shared gate output, i.e. any depth of 1 or more.
+            max_shared_subcircuit_depth = 0 if not has_shared_subexpressions else (1, sys.maxsize)
         
         
         where, params = stat_filter_where(

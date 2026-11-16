@@ -109,6 +109,25 @@ def test_get_random_entry_no_match_allowed(db):
     assert db.get_random_entry(num_inputs=9, allow_empty_result=True) is None
 
 
+def test_get_random_entry_has_shared_subexpressions(db):
+    # Inputs 0, 1 -> AND 2 -> AND 3, and 3 feeds both 4 and 5, which feed the output 6.
+    shared = nx.DiGraph()
+    shared.add_nodes_from([0, 1], gate='src')
+    shared.add_nodes_from([2, 3, 4, 5, 6], gate='AND')
+    shared.add_edges_from([(0, 2), (1, 2), (2, 3), (0, 3), (3, 4), (3, 5), (1, 4), (0, 5), (4, 6), (5, 6)])
+    db.add(shared)
+    db.commit()
+
+    for _ in range(10):
+        assert db.get_random_entry(has_shared_subexpressions=True)['id'] == 5
+        assert db.get_random_entry(has_shared_subexpressions=False)['id'] != 5
+
+
+def test_get_random_entry_rejects_both_shared_filters(db):
+    with pytest.raises(ValueError):
+        db.get_random_entry(has_shared_subexpressions=False, max_shared_subcircuit_depth=0)
+
+
 # ── test circuit_stats ────────────────────────────────────────────────────────────────────
 
 def test_circuit_stats_records_max_shared_subcircuit_depth():
