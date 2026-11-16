@@ -5,7 +5,9 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from rysy_dl.ast_analyzer import canonicalize_ast, evaluate_ast, structurally_equal, truth_table_from_ast
+from rysy_dl.ast_analyzer import (
+    canonicalize_ast, collect_variable_names, evaluate_ast, structurally_equal, truth_table_from_ast,
+)
 from rysy_dl.boolean_expression_parser import And, Not, Or, Var, Xor, parse_boolean_expression
 
 
@@ -73,6 +75,22 @@ def test_evaluate_repeated_variable_is_fine():
     node = And([Var('A'), Var('A')])
     assert evaluate_ast(node, {'A': True}) is True
     assert evaluate_ast(node, {'A': False}) is False
+
+
+# ---------------------------------------------------------------------------
+# collect_variable_names
+# ---------------------------------------------------------------------------
+
+def test_collect_variable_names_single_variable():
+    assert collect_variable_names(Var('A')) == ['A']
+
+
+def test_collect_variable_names_in_order_of_first_appearance():
+    assert collect_variable_names(parse_boolean_expression("(C + A)' ^ B")) == ['C', 'A', 'B']
+
+
+def test_collect_variable_names_lists_each_name_once():
+    assert collect_variable_names(parse_boolean_expression("A*B + A'*B'")) == ['A', 'B']
 
 
 # ---------------------------------------------------------------------------
