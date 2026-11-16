@@ -31,7 +31,7 @@ def _walk_variable_names(ast: Node):
         raise TypeError(f"Unknown AST node type: {type(ast).__name__}")
 
 
-def _collect_variable_names(ast: Node) -> list:
+def collect_variable_names(ast: Node) -> list:
     """Return the distinct variable names appearing in `ast`, in order of
     first appearance (left-to-right, depth-first)."""
     names = []
@@ -87,7 +87,7 @@ def truth_table_from_ast(ast: Node, variable_order: list = None) -> dict:
             variable, in `variable_order` -- to the expression's output (0 or
             1) under that assignment.
     """
-    names = variable_order if variable_order is not None else _collect_variable_names(ast)
+    names = variable_order if variable_order is not None else collect_variable_names(ast)
     truth_table = {}
     for row in range(2 ** len(names)):
         bit_string = format(row, 'b').zfill(len(names))
