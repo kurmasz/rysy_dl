@@ -300,7 +300,8 @@ class CircuitDatabase:
 
     def get_random_entry(self, *, num_gates=None, num_inputs=(1, 4), depth=None,
                           max_indegree=None, max_gate_outdegree=None, max_input_outdegree=None,
-                          gate_type_mask=None, has_shared_subexpressions=None, allow_empty_result=False):
+                          gate_type_mask=None, has_shared_subexpressions=None, allow_empty_result=False,
+                          max_shared_subcircuit_depth=None):
         """
         Fetch a single circuit chosen uniformly at random, optionally filtered.
 
@@ -310,6 +311,17 @@ class CircuitDatabase:
 
         :returns: A dict (see `row_to_record`), or ``None`` if no circuit matches.
         """
+        
+        if has_shared_subexpressions is not None and max_shared_subcircuit_depth is not None:
+            raise ValueError("Cannot filter by both has_shared_subexpressions and max_shared_subcircuit_depth")
+        
+        if has_shared_subexpressions is None and max_shared_subcircuit_depth is not None:
+            # If the user wants to filter by max_shared_subcircuit_depth, we need to filter by has_shared_subexpressions first.
+            if max_shared_subcircuit_depth == 0:
+                has_shared_subexpressions = False
+            else:        
+                raise NotImplementedError("Filtering by max_shared_subcircuit_depth other than 0 is not implemented yet. Please filter by has_shared_subexpressions instead.")
+        
         filters = {
             'num_gates': num_gates,
             'num_inputs': num_inputs,
