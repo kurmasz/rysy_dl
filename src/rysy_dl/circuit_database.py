@@ -19,6 +19,7 @@ Schema:
 import os
 import pickle
 import sqlite3
+from pathlib import Path
 from typing import Callable, ClassVar, Optional, TYPE_CHECKING
 
 import networkx as nx
@@ -144,13 +145,18 @@ class CircuitDatabase:
         with CircuitDatabase(db_path) as db:
             for graph in circuits:
                 db.add(graph)
+
+    With no `db_path`, it opens the database packaged with rysy_dl, read-only::
+
+        with CircuitDatabase() as db:
+            circuit = db.get_random_circuit(num_inputs=3, num_gates=3)
     """
 
     # Factory used by `get_circuit` to turn a record into a `Circuit`. Left unset here so this
     # module has no dependency on `circuit.py`; the package `__init__.py` wires in `Circuit.from_entry`.
     default_circuit_factory: ClassVar[Optional[Callable[[dict], "Circuit"]]] = None
 
-    def __init__(self, db_path=None, commit_every=500, circuit_factory=None):
+    def __init__(self, db_path=None, commit_every=500, circuit_factory=None, read_only=None):
         """
         Open the circuit database at `db_path`.
 
@@ -164,8 +170,13 @@ class CircuitDatabase:
                               losing more uncommitted work if the process crashes before the next commit.
         :param circuit_factory: Callable used by `get_circuit` to turn a record into a `Circuit`.
                                  Defaults to `default_circuit_factory` (set by the package `__init__.py`).
+        :param read_only: Open the database read-only, so `add` raises instead of writing. Defaults to
+                           True when `db_path` is omitted (the packaged database is only meant to be
+                           queried) and False otherwise.
         :raises FileNotFoundError: If `db_path` doesn't exist.
         """
+        if read_only is None:
+            read_only = db_path is None
         if db_path is None:
             db_path = DEFAULT_DB_PATH
         db_path = resolve_db_path(db_path)
@@ -175,10 +186,24 @@ class CircuitDatabase:
         self.commit_every = commit_every
         self._circuit_factory = circuit_factory or type(self).default_circuit_factory
         self._pending = 0
-        self._conn = sqlite3.connect(db_path)
+        if read_only:
+            self._conn = sqlite3.connect(f"{Path(db_path).resolve().as_uri()}?mode=ro", uri=True)
+        else:
+            self._conn = sqlite3.connect(db_path)
+            self._conn.execute(SCHEMA)   # Create the table if it isn't in this file yet.
+            self._conn.commit()
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute(SCHEMA)   # Create the table if it isn't in this file yet.
-        self._conn.commit()
+
+    @property
+    def closed(self):
+        """True once `close` has been called."""
+        return self._conn is None
+
+    def _open_conn(self):
+        """Return the sqlite connection, or raise a clear error if `close` has been called."""
+        if self._conn is None:
+            raise ValueError("CircuitDatabase is closed")
+        return self._conn
 
     def __enter__(self):
         return self
@@ -217,7 +242,7 @@ class CircuitDatabase:
         placeholders = ', '.join('?' for _ in columns)
         values = tuple(stats[col] for col in _STAT_COLUMNS) + (blob,)
 
-        cursor = self._conn.execute(
+        cursor = self._open_conn().execute(
             f"INSERT INTO {TABLE_NAME} ({', '.join(columns)}) VALUES ({placeholders})",
             values,
         )
@@ -228,7 +253,7 @@ class CircuitDatabase:
 
     def commit(self):
         """Commit any inserts made since the last commit."""
-        self._conn.commit()
+        self._open_conn().commit()
         self._pending = 0
 
     def query(self, where=None, params=(), limit=None):
@@ -250,7 +275,7 @@ class CircuitDatabase:
             sql += " LIMIT ?"
             params = tuple(params) + (limit,)
 
-        rows = self._conn.execute(sql, params).fetchall()
+        rows = self._open_conn().execute(sql, params).fetchall()
         return [row_to_record(row) for row in rows]
 
     def iterate(self, where=None, params=()):
@@ -268,7 +293,7 @@ class CircuitDatabase:
             sql += f" WHERE {where}"
         sql += " ORDER BY id"
 
-        cursor = self._conn.execute(sql, params)
+        cursor = self._open_conn().execute(sql, params)
         for row in cursor:
             yield row_to_record(row)
 
@@ -351,7 +376,7 @@ class CircuitDatabase:
             sql += " WHERE " + " AND ".join(where_parts)
         sql += " ORDER BY RANDOM() LIMIT 1"
 
-        row = self._conn.execute(sql, params).fetchone()
+        row = self._open_conn().execute(sql, params).fetchone()
         if row is None and not allow_empty_result:
             raise ValueError('No entry satisfied all requirements: ', sql, params)
         
