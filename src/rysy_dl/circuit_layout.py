@@ -19,13 +19,33 @@ from .custom_gates import FixedNot, Dummy
 logger = logging.getLogger(__name__)
 
 
-def assign_source_labels(graph, name_list=None):
+def assign_source_labels(graph, name_list=None, source_order=None):
+    """Set each source node's 'label' attribute, in order, from `name_list`.
+
+    :param graph: the netlist whose source nodes (in-degree 0) are labeled in place.
+    :param name_list: the labels to hand out; defaults to 'a' through 'h'.
+    :param source_order: the source nodes in the order they should receive labels
+                         (e.g. from `sources_top_to_bottom`). Defaults to sorted node ids.
+    """
     if name_list is None:
         name_list = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
-    source_nodes = [node for node in graph.nodes() if graph.in_degree(node) == 0]
-    source_nodes.sort()
-    for i, node in enumerate(source_nodes):
+    if source_order is None:
+        source_order = sorted(node for node in graph.nodes() if graph.in_degree(node) == 0)
+    for i, node in enumerate(source_order):
         graph.nodes[node]['label'] = name_list[i]
+
+
+def sources_top_to_bottom(netlist):
+    """Return the netlist's source nodes in the order they appear in its layout,
+    top to bottom (ties, which only occur between sources in different layers,
+    go left to right).
+
+    Labels don't affect the layout's geometry, so this can be called before the
+    sources are labeled, and its result passed to `assign_source_labels`.
+    """
+    state = compute_layout(netlist)
+    return sorted(state.source_nodes,
+                  key=lambda n: (-state.position[n][1], state.position[n][0]))
 
 GATE_CLASSES = {
     'OR': logic.Or,

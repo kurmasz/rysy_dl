@@ -210,13 +210,15 @@ def wait_for_user_action(fig=default_fig, show_reassign_button=False):
 def show_netlist(netlist, title_prefix=None, fig=default_fig):
     """Prepare and interactively display one circuit.
 
-    Labels the netlist's sources, lays it out as a circuit diagram, and shows
-    that diagram, then waits for the user to advance to the next circuit or quit.
+    Labels the netlist's sources top to bottom in the order they appear in its
+    layout, lays it out as a circuit diagram, and shows that diagram, then waits
+    for the user to advance to the next circuit or quit.
     If the user clicks "Reassign Gates" instead, the netlist's gates are
     randomly reassigned (see `circuit_generator.assign_gates_randomly`; NOT gates
     are kept) and the modified circuit is displayed, until the user advances or quits.
+    The sources keep the labels from the first layout, even if reassigning moves them.
 
-    Note that reassigning modifies `netlist` in place.
+    Note that labeling and reassigning modify `netlist` in place.
 
     :param netlist: the netlist (a networkx DiGraph with 'gate' attributes assigned)
                     to lay out and display.
@@ -225,7 +227,7 @@ def show_netlist(netlist, title_prefix=None, fig=default_fig):
     :param fig: a matplotlib figure to use for the display.
     :returns: True if the user wants to quit, False if they want to advance to the next circuit.
     """
-    circuit_layout.assign_source_labels(netlist)
+    circuit_layout.assign_source_labels(netlist, source_order=circuit_layout.sources_top_to_bottom(netlist))
 
     while True:
         # Recomputed each time through: reassigning the gates changes the expression.

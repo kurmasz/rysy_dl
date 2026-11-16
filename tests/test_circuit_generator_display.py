@@ -80,7 +80,42 @@ def test_show_netlist_title_uses_overlines_for_not(mocks):
     display.show_netlist(netlist, title_prefix='id=7')
 
     # Wrapped in $...$ so matplotlib renders it as mathtext, with a bar over the negated term.
-    assert mocks.titles == ['id=7: $\\overline{a}b$']
+    # Source 1 is drawn above source 0 (which feeds the NOT), so it is labeled 'a'.
+    assert mocks.titles == ['id=7: $\\overline{b}a$']
+
+
+def _circuit_with_sources_out_of_id_order():
+    # OR(AND(0, 1), 3): the layout puts source 3 above sources 0 and 1.
+    graph = nx.DiGraph([(0, 2), (1, 2), (3, 4), (2, 4)])
+    nx.set_node_attributes(graph, {0: {'gate': 'src'}, 1: {'gate': 'src'}, 3: {'gate': 'src'},
+                                   2: {'gate': 'AND'}, 4: {'gate': 'OR'}})
+    return graph
+
+
+def test_show_netlist_labels_sources_top_to_bottom(mocks):
+    mocks.actions = [display.NEXT]
+    netlist = _circuit_with_sources_out_of_id_order()
+
+    display.show_netlist(netlist, title_prefix='id=7')
+
+    assert display.circuit_layout.sources_top_to_bottom(netlist) == [3, 0, 1]
+    assert {n: netlist.nodes[n]['label'] for n in (3, 0, 1)} == {3: 'a', 0: 'b', 1: 'c'}
+    assert mocks.titles == ['id=7: $a + bc$']
+
+
+def test_show_netlist_keeps_first_labels_after_reassigning(mocks):
+    mocks.actions = [display.REASSIGN_GATES, display.NEXT]
+    netlist = _circuit_with_sources_out_of_id_order()
+    relabel = MagicMock(wraps=display.circuit_layout.assign_source_labels)
+    original_assign = display.circuit_layout.assign_source_labels
+    display.circuit_layout.assign_source_labels = relabel
+    try:
+        display.show_netlist(netlist)
+    finally:
+        display.circuit_layout.assign_source_labels = original_assign
+
+    assert relabel.call_count == 1
+    assert {n: netlist.nodes[n]['label'] for n in (3, 0, 1)} == {3: 'a', 0: 'b', 1: 'c'}
 
 
 # ── test wait_for_user_action: buttons from earlier waits ──────────────────────────────────

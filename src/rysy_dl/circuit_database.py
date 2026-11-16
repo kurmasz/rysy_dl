@@ -348,7 +348,8 @@ class CircuitDatabase:
 
     def get_random_entry(self, *, num_gates=None, num_inputs=(1, 4), depth=None,
                           max_indegree=None, max_gate_outdegree=None, max_input_outdegree=None,
-                          gate_type_mask=None, max_shared_subcircuit_depth=None, allow_empty_result=False):
+                          gate_type_mask=None, max_shared_subcircuit_depth=None, allow_empty_result=False,
+                          has_shared_subexpressions=None):
         """
         Fetch a single circuit chosen uniformly at random, optionally filtered.
 
@@ -358,6 +359,15 @@ class CircuitDatabase:
 
         :returns: A dict (see `row_to_record`), or ``None`` if no circuit matches.
         """
+        
+        ### QQQ TODO Deprecate has_shared_subexpressions in favor of max_shared_subcircuit_depth, which is more general.
+        if max_shared_subcircuit_depth is not None and has_shared_subexpressions is not None:
+            raise ValueError("max_shared_subcircuit_depth and has_shared_subexpressions are mutually exclusive")
+        
+        if max_shared_subcircuit_depth is None and has_shared_subexpressions is not None:
+            max_shared_subcircuit_depth = 0 if not has_shared_subexpressions else None
+        
+        
         where, params = stat_filter_where(
             num_gates=num_gates, num_inputs=num_inputs, depth=depth, max_indegree=max_indegree,
             max_gate_outdegree=max_gate_outdegree, max_input_outdegree=max_input_outdegree,
