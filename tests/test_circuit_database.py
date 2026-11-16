@@ -1,7 +1,9 @@
 """
-Unit tests for the filtering parts of circuit_database.py."""
+Unit tests for the filtering parts of circuit_database.py, and for upgrading old databases."""
 
 import os
+import pickle
+import sqlite3
 import sys
 
 import networkx as nx
@@ -11,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from rysy_dl import circuit_database
 from rysy_dl.circuit_database import CircuitDatabase, stat_filter_where
+from rysy_dl.circuit_serialization import circuit_to_serializable
 
 
 def _and_tree(num_inputs):
@@ -43,7 +46,7 @@ def test_stat_filter_where_no_filters():
 
 
 def test_stat_filter_where_all_none_is_no_filter():
-    assert stat_filter_where(num_gates=None, depth=None) == (None, ())
+    assert stat_filter_where(num_gates_core=None, depth=None) == (None, ())
 
 
 def test_stat_filter_where_exact_value():
@@ -55,9 +58,9 @@ def test_stat_filter_where_range():
 
 
 def test_stat_filter_where_combines_with_and():
-    where, params = stat_filter_where(num_gates=1, num_inputs=(2, 3))
+    where, params = stat_filter_where(num_gates_core=1, num_inputs=(2, 3))
 
-    assert where == "num_gates = ? AND num_inputs BETWEEN ? AND ?"
+    assert where == "num_gates_core = ? AND num_inputs BETWEEN ? AND ?"
     assert params == (1, 2, 3)
 
 
@@ -138,3 +141,157 @@ def test_circuit_stats_records_max_shared_subcircuit_depth():
     graph.add_edges_from([(0, 2), (1, 2), (2, 3), (0, 3), (3, 4), (3, 5), (1, 4), (0, 5), (4, 6), (5, 6)])
 
     assert circuit_database.circuit_stats(graph)['max_shared_subcircuit_depth'] == 2
+
+
+def _with_source_nots():
+    """(A' * B) + (A * B'): inputs 0 and 1, NOTs 2 and 3, ANDs 4 and 5, output OR 6."""
+    graph = nx.DiGraph()
+    graph.add_nodes_from([0, 1], gate='src')
+    graph.add_nodes_from([2, 3], gate='NOT')
+    graph.add_nodes_from([4, 5], gate='AND')
+    graph.add_node(6, gate='OR')
+    graph.add_edges_from([(0, 2), (2, 4), (1, 4), (0, 5), (1, 3), (3, 5), (4, 6), (5, 6)])
+    return graph
+
+
+def test_circuit_stats_core_gates_exclude_nots():
+    stats = circuit_database.circuit_stats(_with_source_nots())
+    assert stats['num_gates_core'] == 3
+    assert stats['num_gates_total'] == 5
+
+
+def test_circuit_stats_counts_nots_by_gate_not_shape():
+    # Gate 2 has one input and one output, like a NOT, but it is an AND.
+    graph = nx.DiGraph()
+    graph.add_nodes_from([0, 1], gate='src')
+    graph.add_nodes_from([2, 3], gate='AND')
+    graph.add_edges_from([(0, 2), (2, 3), (1, 3)])
+    stats = circuit_database.circuit_stats(graph)
+    assert stats['num_gates_core'] == stats['num_gates_total'] == 2
+
+
+def test_get_random_entry_filters_on_core_and_total_gates(db):
+    db.add(_with_source_nots())
+    db.commit()
+    # The AND trees (ids 1-4) each have one gate and no NOTs.
+    assert db.get_random_entry(num_inputs=None, num_gates_core=3)['id'] == 5
+    assert db.get_random_entry(num_inputs=None, num_gates_total=5)['id'] == 5
+    assert db.get_random_entry(num_inputs=None, num_gates_total=3, allow_empty_result=True) is None
+
+
+# ── test upgrade ────────────────────────────────────────────────────────────────────────────
+
+# The schema before num_gates was split into num_gates_core and num_gates_total.
+_OLD_SCHEMA = """
+CREATE TABLE circuits (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    num_gates           INTEGER NOT NULL,
+    num_inputs          INTEGER NOT NULL,
+    depth               INTEGER NOT NULL,
+    max_indegree        INTEGER NOT NULL,
+    max_gate_outdegree  INTEGER NOT NULL,
+    max_input_outdegree INTEGER NOT NULL,
+    gate_type_mask      INTEGER NOT NULL,
+    max_shared_subcircuit_depth INTEGER NOT NULL,
+    graph               BLOB NOT NULL
+)
+"""
+
+
+@pytest.fixture
+def old_db_path(tmp_path):
+    """An old-schema database holding an AND tree (id 1) and a circuit with two NOTs (id 2)."""
+    path = str(tmp_path / "old.sqlite")
+    conn = sqlite3.connect(path)
+    conn.execute(_OLD_SCHEMA)
+    for graph in (_and_tree(3), _with_source_nots()):
+        stats = circuit_database.circuit_stats(graph)
+        conn.execute(
+            "INSERT INTO circuits (num_gates, num_inputs, depth, max_indegree, max_gate_outdegree, "
+            "max_input_outdegree, gate_type_mask, max_shared_subcircuit_depth, graph) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (stats['num_gates_total'], stats['num_inputs'], stats['depth'], stats['max_indegree'],
+             stats['max_gate_outdegree'], stats['max_input_outdegree'], stats['gate_type_mask'],
+             stats['max_shared_subcircuit_depth'], pickle.dumps(circuit_to_serializable(graph))))
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_upgrade_splits_num_gates(old_db_path):
+    assert circuit_database.upgrade(old_db_path) == 2
+
+    with CircuitDatabase(old_db_path, read_only=True) as db:
+        tree, with_nots = db.query()
+    assert (tree['num_gates_core'], tree['num_gates_total']) == (1, 1)
+    assert (with_nots['num_gates_core'], with_nots['num_gates_total']) == (3, 5)
+
+
+def test_upgraded_database_matches_a_new_one(old_db_path, tmp_path):
+    circuit_database.upgrade(old_db_path)
+    new_path = str(tmp_path / "new.sqlite")
+    circuit_database.create(new_path)
+    with CircuitDatabase(new_path) as db:
+        db.add(_and_tree(3))
+        db.add(_with_source_nots())
+
+    with CircuitDatabase(old_db_path, read_only=True) as old, CircuitDatabase(new_path, read_only=True) as new:
+        strip = lambda records: [{k: v for k, v in r.items() if k != 'graph'} for r in records]
+        assert strip(old.query()) == strip(new.query())
+
+
+def test_upgraded_database_accepts_new_circuits(old_db_path):
+    circuit_database.upgrade(old_db_path)
+    with CircuitDatabase(old_db_path) as db:
+        db.add(_and_tree(2))
+        assert db.get_random_entry(num_inputs=None, num_gates_core=1, num_gates_total=1)['id'] in (1, 3)
+
+
+def test_upgrade_twice_does_nothing_the_second_time(old_db_path):
+    circuit_database.upgrade(old_db_path)
+    assert circuit_database.upgrade(old_db_path) == 0
+
+
+def test_upgrade_current_database_does_nothing(tmp_path):
+    path = str(tmp_path / "new.sqlite")
+    circuit_database.create(path)
+    assert circuit_database.upgrade(path) == 0
+
+
+def test_upgrade_missing_file_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        circuit_database.upgrade(str(tmp_path / "missing.sqlite"))
+
+
+def test_upgrade_rejects_file_without_circuits_table(tmp_path):
+    path = str(tmp_path / "other.sqlite")
+    sqlite3.connect(path).close()
+    with pytest.raises(ValueError):
+        circuit_database.upgrade(path)
+
+
+def test_upgrade_failure_leaves_database_unchanged(old_db_path, monkeypatch):
+    def broken(_):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(circuit_database, 'serializable_to_circuit', broken)
+
+    with pytest.raises(RuntimeError):
+        circuit_database.upgrade(old_db_path)
+
+    conn = sqlite3.connect(old_db_path)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(circuits)")}
+    conn.close()
+    assert 'num_gates' in columns and 'num_gates_core' not in columns
+
+
+def test_upgrade_while_another_program_reads_fails_fast_and_changes_nothing(old_db_path):
+    reader = sqlite3.connect(old_db_path)
+    reader.execute("BEGIN")
+    reader.execute("SELECT * FROM circuits").fetchone()    # holds a read lock, like an open view-circuits
+    try:
+        with pytest.raises(RuntimeError, match="in use by another program"):
+            circuit_database.upgrade(old_db_path)
+    finally:
+        reader.close()
+
+    assert circuit_database.upgrade(old_db_path) == 2       # works once the reader is gone

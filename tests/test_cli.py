@@ -480,7 +480,8 @@ def test_view_circuits_parses_filter_options(monkeypatch):
     received = []
     monkeypatch.setattr(cli, 'cmd_view_circuits', received.append)
     monkeypatch.setattr(sys, 'argv', ['rysy_dl', 'view-circuits', 'foo.db', '--num-inputs', '2-4',
-                                      '--depth', '3', '--max-shared-subcircuit-depth', '0'])
+                                      '--depth', '3', '--max-shared-subcircuit-depth', '0',
+                                      '--num-gates-core', '3-4', '--num-gates-total', '5'])
 
     cli.main()
 
@@ -488,14 +489,17 @@ def test_view_circuits_parses_filter_options(monkeypatch):
     assert args.num_inputs == (2, 4)
     assert args.depth == 3
     assert args.max_shared_subcircuit_depth == 0
-    for name in cli.VIEW_CIRCUITS_FILTERS.keys() - {'num_inputs', 'depth', 'max_shared_subcircuit_depth'}:
+    assert args.num_gates_core == (3, 4)
+    assert args.num_gates_total == 5
+    given = {'num_inputs', 'depth', 'max_shared_subcircuit_depth', 'num_gates_core', 'num_gates_total'}
+    for name in cli.VIEW_CIRCUITS_FILTERS.keys() - given:
         assert getattr(args, name) is None
 
 
 def test_view_circuits_id_with_filter_exits(capsys):
     args = argparse.Namespace(db_name='foo.db', id=3,
                               **{name: None for name in cli.VIEW_CIRCUITS_FILTERS})
-    args.num_gates = 4
+    args.num_gates_core = 4
 
     with pytest.raises(SystemExit) as exc_info:
         cli.cmd_view_circuits(args)
@@ -633,3 +637,34 @@ def test_cmd_generate_circuits_dry_run_passes_ranges_without_db(monkeypatch):
 
     assert calls['db'] is None and calls['dry_run'] is True
     assert calls['num_sources'] == (2, 3) and calls['num_gates'] == (3, 3)
+
+
+# ── upgrade-db ───────────────────────────────────────────────────────────────
+
+def test_upgrade_db_reports_each_database(tmp_path, monkeypatch, capsys):
+    upgraded = {'old.sqlite': 7, 'new.sqlite': 0}
+    monkeypatch.setattr(cli.circuit_database, 'upgrade', lambda path: upgraded[os.path.basename(path)])
+    monkeypatch.setattr(sys, 'argv', ['rysy_dl', 'upgrade-db', 'old.sqlite', 'new.sqlite'])
+
+    cli.main()
+
+    out = capsys.readouterr().out
+    assert 'old.sqlite: upgraded 7 circuits' in out
+    assert 'new.sqlite: already up to date' in out
+
+
+def test_upgrade_db_missing_file_exits_after_trying_the_rest(tmp_path, monkeypatch, capsys):
+    def upgrade(path):
+        if 'missing' in path:
+            raise FileNotFoundError(f"Circuit database not found: {path}")
+        return 0
+    monkeypatch.setattr(cli.circuit_database, 'upgrade', upgrade)
+    monkeypatch.setattr(sys, 'argv', ['rysy_dl', 'upgrade-db', 'missing.sqlite', 'ok.sqlite'])
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert 'missing.sqlite' in captured.err
+    assert 'ok.sqlite: already up to date' in captured.out

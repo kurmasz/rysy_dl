@@ -287,7 +287,8 @@ def cmd_layout(args):
 # view-circuits options that restrict which circuits are shown: one per keyword of
 # CircuitDatabase.get_random_entry / iterate_entries, mapped to its --help description.
 VIEW_CIRCUITS_FILTERS = {
-    'num_gates': 'number of gates (non-input nodes, including NOT gates)',
+    'num_gates_core': 'number of gates, not counting NOT gates',
+    'num_gates_total': 'number of gates, including NOT gates',
     'num_inputs': 'number of input variables',
     'depth': 'length of the longest path from an input to the output',
     'max_indegree': 'largest fan-in of any gate',
@@ -342,6 +343,23 @@ def cmd_view_circuits(args):
         sys.exit(1)
 
 
+def cmd_upgrade_db(args):
+    failed = False
+    for db_name in args.db_names:
+        try:
+            num_upgraded = circuit_database.upgrade(db_name)
+        except (FileNotFoundError, ValueError, RuntimeError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            failed = True
+            continue
+        if num_upgraded:
+            print(f"{db_name}: upgraded {num_upgraded} circuits")
+        else:
+            print(f"{db_name}: already up to date")
+    if failed:
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -365,8 +383,8 @@ def main():
     gc_parser.add_argument('--num-inputs', type=_int_range, default=None, metavar='N|MIN-MAX',
                            help='Number of input variables (source nodes), e.g. 3 or 2-5 (default: 2-4)')
     gc_parser.add_argument('--num-gates', type=_int_range, default=None, metavar='N|MIN-MAX',
-                           help='Number of gates, including the output gate but not inserted NOT gates, '
-                                'e.g. 4 or 3-5 (default: 3-4)')
+                           help='Number of gates, including the output gate but not inserted NOT gates '
+                                '(the num_gates_core column), e.g. 4 or 3-5 (default: 3-4)')
     gc_parser.add_argument('--max-nodes', type=int, default=None,
                            help='Leave out circuits with more than this many inputs + gates. The circuit size, '
                                 'not the number of inputs, is what makes enumeration expensive (default: no limit)')
@@ -411,6 +429,12 @@ def main():
                                            help=f'Only display circuits whose {description} is N, '
                                                 f'or between MIN and MAX inclusive.')
     view_circuits_parser.set_defaults(func=cmd_view_circuits)
+
+    upgrade_parser = subparsers.add_parser('upgrade-db', help='Update circuit databases to the current schema, in place')
+    upgrade_parser.add_argument('db_names', nargs='+', metavar='db_name',
+                                 help='Path to a sqlite database of circuits. Databases that are already '
+                                      'current are left unchanged.')
+    upgrade_parser.set_defaults(func=cmd_upgrade_db)
 
     args = parser.parse_args()
     logging.basicConfig(level=LOG_LEVELS[args.log_level])

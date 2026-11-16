@@ -5,7 +5,8 @@ Manage a database of combinatorial circuits that can be used for computer organi
 
 Schema:
   id: int, primary key
-  num_gates: int
+  num_gates_core: int (every gate except NOT gates; "core" gates)
+  num_gates_total: int (every gate, including NOT gates)
   num_inputs: int
   depth: int
   max_indegree: int
@@ -55,7 +56,8 @@ GATE_BITS = {
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    num_gates           INTEGER NOT NULL,
+    num_gates_core      INTEGER NOT NULL,
+    num_gates_total     INTEGER NOT NULL,
     num_inputs          INTEGER NOT NULL,
     depth               INTEGER NOT NULL,
     max_indegree        INTEGER NOT NULL,
@@ -69,7 +71,7 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
 
 # Every column except id/graph, in schema order -- reused by CircuitDatabase.add (INSERT)
 # and row_to_record (turning a row back into a dict).
-_STAT_COLUMNS = ('num_gates', 'num_inputs', 'depth', 'max_indegree',
+_STAT_COLUMNS = ('num_gates_core', 'num_gates_total', 'num_inputs', 'depth', 'max_indegree',
                   'max_gate_outdegree', 'max_input_outdegree', 'gate_type_mask',
                   'max_shared_subcircuit_depth')
 
@@ -93,16 +95,21 @@ def circuit_stats(graph):
     Compute every schema column (other than `id` and `graph`) for a circuit graph.
 
     :param graph: A networkx DiGraph representing a circuit, as produced by `circuit_generator`.
-    :returns: A dict keyed by column name: num_gates, num_inputs, depth, max_indegree,
-              max_gate_outdegree, max_input_outdegree, gate_type_mask, max_shared_subcircuit_depth.
+    :returns: A dict keyed by column name: num_gates_core, num_gates_total, num_inputs, depth,
+              max_indegree, max_gate_outdegree, max_input_outdegree, gate_type_mask,
+              max_shared_subcircuit_depth.
     """
-    num_sources, num_gates, _not_gates = num_sources_and_gates(graph)
+    num_sources, num_gates_total, _ = num_sources_and_gates(graph)
+    # Count NOTs by their assigned gate, not by shape: in a graph whose gates aren't assigned yet,
+    # a node with one input and one output is not necessarily a NOT.
+    num_not_gates = sum(1 for _, gate in graph.nodes(data='gate') if gate == 'NOT')
 
     gate_outdegrees = [graph.out_degree(n) for n in graph.nodes() if graph.in_degree(n) > 0]
     input_outdegrees = [graph.out_degree(n) for n in graph.nodes() if graph.in_degree(n) == 0]
 
     return {
-        'num_gates': num_gates,
+        'num_gates_core': num_gates_total - num_not_gates,
+        'num_gates_total': num_gates_total,
         'num_inputs': num_sources,
         'depth': nx.dag_longest_path_length(graph),
         'max_indegree': max((graph.in_degree(n) for n in graph.nodes()), default=0),
@@ -149,7 +156,7 @@ def row_to_record(row):
     whose `graph` value is a reconstructed networkx DiGraph rather than a pickled blob.
 
     :param row: A row from the `circuits` table, with column access by name (e.g. `row['graph']`).
-    :returns: A dict with keys id, num_gates, num_inputs, depth, max_indegree, max_gate_outdegree,
+    :returns: A dict with keys id, num_gates_core, num_gates_total, num_inputs, depth, max_indegree, max_gate_outdegree,
               max_input_outdegree, gate_type_mask, max_shared_subcircuit_depth, and graph (a networkx DiGraph).
     """
     record = {col: row[col] for col in ('id',) + _STAT_COLUMNS}
@@ -180,7 +187,7 @@ class CircuitDatabase:
     With no `db_path`, it opens the database packaged with rysy_dl, read-only::
 
         with CircuitDatabase() as db:
-            circuit = db.get_random_circuit(num_inputs=3, num_gates=3)
+            circuit = db.get_random_circuit(num_inputs=3, num_gates_core=3)
     """
 
     # Factory used by `get_circuit` to turn a record into a `Circuit`. Left unset here so this
@@ -292,7 +299,7 @@ class CircuitDatabase:
         Query circuits from the database.
 
         :param where: Optional SQL boolean expression (without the leading ``WHERE``) using ``?``
-                      placeholders for values, e.g. ``"num_gates <= ? AND gate_type_mask & ? != 0"``.
+                      placeholders for values, e.g. ``"num_gates_core <= ? AND gate_type_mask & ? != 0"``.
                       If omitted, every row is returned.
         :param params: Tuple of values to substitute for the ``?`` placeholders in `where`.
         :param limit: Optional maximum number of rows to return.
@@ -314,7 +321,7 @@ class CircuitDatabase:
         Iterate over circuits one row at a time, without loading the whole result set into memory.
 
         :param where: Optional SQL boolean expression (without the leading ``WHERE``) using ``?``
-                      placeholders for values, e.g. ``"num_gates <= ?"``. If omitted, every row is
+                      placeholders for values, e.g. ``"num_gates_core <= ?"``. If omitted, every row is
                       returned.
         :param params: Tuple of values to substitute for the ``?`` placeholders in `where`.
         :yields: A dict (see `row_to_record`) for each matching circuit, ordered by `id`.
@@ -354,7 +361,7 @@ class CircuitDatabase:
         """
         return self._to_circuit(self.get_entry(circuit_id))
 
-    def iterate_entries(self, *, num_gates=None, num_inputs=None, depth=None,
+    def iterate_entries(self, *, num_gates_core=None, num_gates_total=None, num_inputs=None, depth=None,
                         max_indegree=None, max_gate_outdegree=None, max_input_outdegree=None,
                         gate_type_mask=None, max_shared_subcircuit_depth=None):
         """
@@ -366,13 +373,14 @@ class CircuitDatabase:
         :yields: A dict (see `row_to_record`) for each matching circuit.
         """
         where, params = stat_filter_where(
-            num_gates=num_gates, num_inputs=num_inputs, depth=depth, max_indegree=max_indegree,
+            num_gates_core=num_gates_core, num_gates_total=num_gates_total, num_inputs=num_inputs,
+            depth=depth, max_indegree=max_indegree,
             max_gate_outdegree=max_gate_outdegree, max_input_outdegree=max_input_outdegree,
             gate_type_mask=gate_type_mask, max_shared_subcircuit_depth=max_shared_subcircuit_depth,
         )
         return self.iterate(where, params)
 
-    def get_random_entry(self, *, num_gates=None, num_inputs=(1, 4), depth=None,
+    def get_random_entry(self, *, num_gates_core=None, num_gates_total=None, num_inputs=(1, 4), depth=None,
                           max_indegree=None, max_gate_outdegree=None, max_input_outdegree=None,
                           gate_type_mask=None, max_shared_subcircuit_depth=None, allow_empty_result=False,
                           has_shared_subexpressions=None):
@@ -396,7 +404,8 @@ class CircuitDatabase:
         
         
         where, params = stat_filter_where(
-            num_gates=num_gates, num_inputs=num_inputs, depth=depth, max_indegree=max_indegree,
+            num_gates_core=num_gates_core, num_gates_total=num_gates_total, num_inputs=num_inputs,
+            depth=depth, max_indegree=max_indegree,
             max_gate_outdegree=max_gate_outdegree, max_input_outdegree=max_input_outdegree,
             gate_type_mask=gate_type_mask, max_shared_subcircuit_depth=max_shared_subcircuit_depth,
         )
@@ -439,5 +448,65 @@ def create(db_path):
     try:
         conn.execute(SCHEMA)
         conn.commit()
+    finally:
+        conn.close()
+
+
+def upgrade(db_path):
+    """
+    Bring an existing circuit database up to the current schema, in place.
+
+    The only change so far: the old `num_gates` column (which counted NOT gates) becomes
+    `num_gates_total`, and a new `num_gates_core` column counts every gate except NOT gates,
+    computed from each stored graph. The upgrade runs in a single transaction, so a failure
+    leaves the file unchanged. Upgrading a database that is already current does nothing.
+
+    :param db_path: Path to the sqlite database. A string prefixed with '@' is resolved against
+                    the `rysy_dl.db` package directory.
+    :returns: The number of circuits upgraded (0 if the database was already current).
+    :raises FileNotFoundError: If `db_path` doesn't exist.
+    :raises ValueError: If the file doesn't have a recognizable circuits table.
+    :raises RuntimeError: If another program has the database open.
+    """
+    db_path = resolve_db_path(db_path)
+    if not os.path.exists(db_path):
+        raise FileNotFoundError(f"Circuit database not found: {db_path}")
+
+    conn = sqlite3.connect(db_path, isolation_level=None)   # transactions managed explicitly below
+    try:
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({TABLE_NAME})")}
+        if {'num_gates_core', 'num_gates_total'} <= columns:
+            return 0
+        if 'num_gates' not in columns:
+            raise ValueError(f"{db_path} has no '{TABLE_NAME}' table with a num_gates column to upgrade")
+
+        # Take exclusive access up front. Otherwise another program reading the file (such as an open
+        # view-circuits window) makes every write wait out the busy timeout, so the upgrade crawls
+        # instead of failing.
+        try:
+            conn.execute("BEGIN EXCLUSIVE")
+        except sqlite3.OperationalError as e:
+            if 'locked' not in str(e):
+                raise
+            raise RuntimeError(f"{db_path} is in use by another program (for example, an open "
+                               f"view-circuits window). Close it and try again.") from e
+        try:
+            conn.execute(f"ALTER TABLE {TABLE_NAME} RENAME COLUMN num_gates TO num_gates_total")
+            conn.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN num_gates_core INTEGER NOT NULL DEFAULT 0")
+            updates = []
+            for circuit_id, blob in conn.execute(f"SELECT id, graph FROM {TABLE_NAME}"):
+                graph = serializable_to_circuit(pickle.loads(blob))
+                num_not_gates = sum(1 for _, gate in graph.nodes(data='gate') if gate == 'NOT')
+                updates.append((num_not_gates, circuit_id))
+            conn.executemany(
+                f"UPDATE {TABLE_NAME} SET num_gates_core = num_gates_total - ? WHERE id = ?", updates)
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        # Filling in the new column lengthens every row, which splits pages and leaves them partly
+        # empty (about 12% larger for enumerate_all_4-7). VACUUM repacks the file.
+        conn.execute("VACUUM")
+        return len(updates)
     finally:
         conn.close()
