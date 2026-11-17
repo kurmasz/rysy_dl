@@ -1,18 +1,14 @@
 """
-Refinement: adjust the heights that `placement` chose, now that the whole
-layout exists to judge them against.
+Refinement: adjust the heights that placement chose, now that the whole layout
+exists to judge them against.
 
-Placement works one layer at a time, so a layer knows nothing of what the
-layers either side of it needed. That leaves faults which are easy to see, and
-easy to fix, once every node has a height:
+    align_fanout_nodes       a node feeding several gates sits level with none
+    straighten_wires         a long wire takes a step at every layer it crosses
+    resolve_track_conflicts  two unrelated wires would run along the same track
 
-    align_fanout_nodes     a node feeding several gates sits level with none
-    straighten_wires       a long wire takes a step at every layer it crosses
-    separate_wire_tracks   two unrelated wires run along the same track
-    resolve_track_conflicts  ... and no choice of channels can part them
-
-Each pass moves one node at a time, never past its neighbours in its layer
-(so the crossing-minimal order survives), and keeps a move only if it helps.
+Each pass moves nodes only in ways that keep every layer in order and every
+pair of neighbours their minimum distance apart, and keeps a move only if it
+helps. `refine` runs them all; `quality` scores the result.
 """
 
 import contextlib
@@ -214,49 +210,6 @@ def straighten_wires(state, rounds=3):
             break
 
 
-def separate_wire_tracks(state):
-    """Nudge a weightless node aside when its wire would run along the same
-    horizontal track as a different net's.
-
-    Placement keeps *nodes* apart but says nothing about the tracks their
-    wires run along, so a node can land a hair away from a pin that some other
-    net's wire runs to, and the two wires cross the gap between layers side by
-    side, close enough to read as one.
-
-    Only weightless nodes are moved: shifting a gate would take its input pins
-    with it and just move the problem. A node that can't be cleared without
-    passing a neighbour is left where it is.
-    """
-    clearance = state.spacing.wire_clearance
-    pin_heights = _pin_heights_by_net(state)
-
-    for layer in state.layers:
-        for node in layer:
-            if not state.is_weightless(node):
-                continue
-            tracks = _foreign_tracks(state, node, pin_heights)
-            current = state.y[node]
-            if _clear_of(current, tracks, clearance):
-                continue
-
-            limits = _travel_limits(state, node)
-            candidates = [current]
-            for track in tracks:
-                candidates.extend((track + clearance, track - clearance))
-
-            nearest = None
-            for candidate in candidates:
-                if not _within(candidate, limits):
-                    continue
-                if not _clear_of(candidate, tracks, clearance - FLOAT_NOISE):
-                    continue
-                if nearest is None or abs(candidate - current) < abs(nearest - current):
-                    nearest = candidate
-
-            if nearest is not None:
-                state.y[node] = nearest
-
-
 def _push_plan(state, node, height):
     """{node: new height} for moving `node` to `height` and pushing along any
     neighbours in its layer that would otherwise be left too close to it --
@@ -335,3 +288,25 @@ def resolve_track_conflicts(state):
             if best_plan is None:
                 break
             state.y.update(best_plan)
+
+
+def refine(state):
+    align_fanout_nodes(state)
+    straighten_wires(state)
+    resolve_track_conflicts(state)
+
+
+def quality(state):
+    """How good the placement in state.y is, as a tuple in which lower is
+    better and earlier entries matter more: wires that will share a track,
+    wire crossings, bends, and total vertical wire."""
+    paths = wire_paths(state.netlist)
+    gap_costs = [routing.gap_cost(state, layer) for layer in state.layers[1:]]
+    vertical_wire = sum(abs(a - b)
+                        for path in paths
+                        for heights in [path_heights(state, path)]
+                        for a, b in zip(heights, heights[1:]))
+    return (sum(shared_tracks for shared_tracks, _ in gap_costs),
+            sum(crossings for _, crossings in gap_costs),
+            _jogs(state, paths),
+            vertical_wire)

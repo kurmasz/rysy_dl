@@ -52,6 +52,7 @@ import sys
 
 import schemdraw
 
+from . import circuit_layout
 from .circuit import Circuit
 from .circuit_analyzer import circuit_to_expression
 from .circuit_database import CircuitDatabase
@@ -436,6 +437,8 @@ def main(argv=None):
     snapshot_parser.add_argument('--variants', type=int, default=DEFAULT_VARIANTS,
                                  help="Randomly gated versions of each sampled circuit, in addition "
                                       f"to the stored one (default: {DEFAULT_VARIANTS}).")
+    snapshot_parser.add_argument('--placement', default=None, choices=('best', 'layered', 'global'),
+                                 help="Placement method to lay out with (default: circuit_layout's).")
     snapshot_parser.add_argument('--no-images', action='store_true',
                                  help="Skip writing an SVG per circuit.")
 
@@ -451,6 +454,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.command == 'snapshot':
+        if args.placement:
+            circuit_layout.PLACEMENT = args.placement
         snapshot = take_snapshot(args.directory, images=not args.no_images,
                                  db_paths=tuple(args.db) if args.db else (None,),
                                  limit=args.limit, seed=args.seed, variants=args.variants)

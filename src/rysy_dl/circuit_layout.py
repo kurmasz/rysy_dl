@@ -17,7 +17,8 @@ import io
 
 import schemdraw
 
-from .layout import layering, ordering, placement, refinement, render, routing
+from .layout import (global_placement, layering, ordering, placement, refinement,
+                     render, routing)
 from .layout.gates import GATE_CLASSES  # noqa: F401  (part of this module's interface)
 from .layout.state import LayoutState, SpacingConfig
 
@@ -49,11 +50,39 @@ def sources_top_to_bottom(netlist):
     return sorted(state.sources, key=lambda node: -state.y[node])
 
 
-def compute_layout(netlist, spacing=None):
+# How node heights are chosen. Each method suits some circuits better than the
+# other -- 'layered' tends to give fewer crossings, 'global' fewer bends -- and
+# both are quick, so the default is to try both and keep the better result.
+PLACEMENT_METHODS = {
+    'layered': placement.place_nodes,           # one layer at a time, outward from the sink
+    'global': global_placement.place_nodes,     # all heights at once
+}
+PLACEMENT = 'best'
+
+
+def _place_nodes(state, method):
+    """Set state.y by `method`: one of PLACEMENT_METHODS, or 'best' for
+    whichever of them comes out best (see `refinement.quality`) once refined."""
+    if method != 'best' and method not in PLACEMENT_METHODS:
+        raise ValueError(f"Unknown placement method: {method!r}")
+    methods = PLACEMENT_METHODS.values() if method == 'best' else [PLACEMENT_METHODS[method]]
+
+    best = None
+    for place_nodes in methods:
+        place_nodes(state)
+        refinement.refine(state)
+        result = (refinement.quality(state), dict(state.y))
+        if best is None or result[0] < best[0]:
+            best = result
+    state.y = best[1]
+
+
+def compute_layout(netlist, spacing=None, placement_method=None):
     """Work out where everything goes -- nodes, wires and junction dots -- and
     return it as a LayoutState, without drawing anything.
 
-    `spacing` overrides the default SpacingConfig.
+    `spacing` overrides the default SpacingConfig, and `placement_method` the
+    module-level PLACEMENT.
     """
     state = LayoutState(netlist=netlist, spacing=spacing or SpacingConfig())
 
@@ -64,22 +93,17 @@ def compute_layout(netlist, spacing=None):
     ordering.assign_pins(state)
 
     placement.set_layer_positions(state)
-    placement.place_nodes(state)
-
-    refinement.align_fanout_nodes(state)
-    refinement.straighten_wires(state)
-    refinement.separate_wire_tracks(state)
-    refinement.resolve_track_conflicts(state)
+    _place_nodes(state, placement_method or PLACEMENT)
 
     routing.route(state)
     return state
 
 
-def build_layout(netlist, spacing=None):
+def build_layout(netlist, spacing=None, placement_method=None):
     """Compute the layout and draw it, returning the whole LayoutState. The
     Drawing is `state.diagram`; callers that want only that should use
     `layout_circuit`."""
-    state = compute_layout(netlist, spacing)
+    state = compute_layout(netlist, spacing, placement_method)
     render.draw(state)
     return state
 

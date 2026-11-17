@@ -6,7 +6,9 @@ The phases of circuit layout, one module each, in the order they run:
     ordering    the bottom-to-top order of the nodes within each layer, chosen
                 to minimise wire crossings; fixes which input pin each wire
                 lands on
-    placement   a height for every node, within that order
+    placement   a height for every node, within that order, one layer at a
+                time; global_placement does the same job by solving for every
+                height at once. Each wins on some circuits, so both are tried.
     refinement  small adjustments to heights that remove needless bends and
                 keep unrelated wires off the same track
     routing     the wire segments and junction dots joining outputs to pins

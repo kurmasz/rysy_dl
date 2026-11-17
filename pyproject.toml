@@ -28,6 +28,7 @@ dependencies = [
     "networkx",
     "Pillow",
     "schemdraw",
+    "scipy",
 ]
 
 [project.optional-dependencies]
