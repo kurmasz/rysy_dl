@@ -347,13 +347,13 @@ def cmd_upgrade_db(args):
     failed = False
     for db_name in args.db_names:
         try:
-            num_upgraded = circuit_database.upgrade(db_name)
+            changes = circuit_database.upgrade(db_name)
         except (FileNotFoundError, ValueError, RuntimeError) as e:
             print(f"Error: {e}", file=sys.stderr)
             failed = True
             continue
-        if num_upgraded:
-            print(f"{db_name}: upgraded {num_upgraded} circuits")
+        if changes:
+            print(f"{db_name}: {'; '.join(changes)}")
         else:
             print(f"{db_name}: already up to date")
     if failed:

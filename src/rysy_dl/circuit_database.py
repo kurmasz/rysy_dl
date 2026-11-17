@@ -78,6 +78,16 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
 )
 """
 
+# Lets the usual question queries read only the matching rows instead of the whole table: for
+# enumerate_all_4-7, a 3-input query reads 0.8 MB instead of 28 MB, for 5.6 MB more on disk.
+# It speeds up queries but doesn't change what's stored, so it isn't part of FORMAT_VERSION;
+# `upgrade` adds it to databases created without it.
+INDEX_NAME = f"{TABLE_NAME}_by_size"
+INDEX_SCHEMA = f"""
+CREATE INDEX IF NOT EXISTS {INDEX_NAME}
+    ON {TABLE_NAME} (num_inputs, num_gates_core, max_shared_subcircuit_depth)
+"""
+
 # Every column except id/graph, in schema order -- reused by CircuitDatabase.add (INSERT)
 # and row_to_record (turning a row back into a dict).
 _STAT_COLUMNS = ('num_gates_core', 'num_gates_total', 'num_inputs', 'depth', 'max_indegree',
@@ -174,13 +184,18 @@ def row_to_record(row):
 
 
 def _create_schema(conn):
-    """Create the circuits table if the file doesn't have one yet, marking a new file with FORMAT_VERSION."""
-    exists = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (TABLE_NAME,)).fetchone()
-    if not exists:
+    """Create the circuits table and its index if the file doesn't have them yet, marking a new file with FORMAT_VERSION."""
+    if not _schema_object_exists(conn, 'table', TABLE_NAME):
         conn.execute(SCHEMA)
+        conn.execute(INDEX_SCHEMA)
         conn.execute(f"PRAGMA user_version = {FORMAT_VERSION}")
     conn.commit()
+
+
+def _schema_object_exists(conn, kind, name):
+    """True if the database has a table or index (`kind`) called `name`."""
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?", (kind, name)).fetchone() is not None
 
 
 def _format_error(db_path, version):
@@ -492,13 +507,15 @@ def upgrade(db_path):
         `num_gates_core` column counts every gate except NOT gates, computed from each stored graph.
       * Graphs pickled as `circuit_to_serializable` dicts (format version 0) are re-encoded with
         `circuit_serialization.circuit_to_bytes` (version 1), about a fifth of the size.
+      * The query index (`INDEX_NAME`) is added if it's missing.
 
     The upgrade runs in a single transaction, so a failure leaves the file unchanged, and it
     compacts the file afterwards. Upgrading a database that is already current does nothing.
 
     :param db_path: Path to the sqlite database. A string prefixed with '@' is resolved against
                     the `rysy_dl.db` package directory.
-    :returns: The number of circuits upgraded (0 if the database was already current).
+    :returns: A list of short descriptions of the changes made; empty if the database was already
+              current.
     :raises FileNotFoundError: If `db_path` doesn't exist.
     :raises ValueError: If the file doesn't have a recognizable circuits table, or is in a format
                         newer than this code knows.
@@ -517,8 +534,10 @@ def upgrade(db_path):
             raise ValueError(f"{db_path} has no '{TABLE_NAME}' table to upgrade")
         if version > FORMAT_VERSION:
             raise _format_error(db_path, version)
-        if not has_old_gate_count and version == FORMAT_VERSION:
-            return 0
+        rewrite_rows = has_old_gate_count or version < FORMAT_VERSION
+        add_index = not _schema_object_exists(conn, 'index', INDEX_NAME)
+        if not rewrite_rows and not add_index:
+            return []
 
         # Take exclusive access up front. Otherwise another program reading the file (such as an open
         # view-circuits window) makes every write wait out the busy timeout, so the upgrade crawls
@@ -530,30 +549,39 @@ def upgrade(db_path):
                 raise
             raise RuntimeError(f"{db_path} is in use by another program (for example, an open "
                                f"view-circuits window). Close it and try again.") from e
+        changes = []
         try:
             if has_old_gate_count:
                 conn.execute(f"ALTER TABLE {TABLE_NAME} RENAME COLUMN num_gates TO num_gates_total")
                 conn.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN num_gates_core INTEGER NOT NULL DEFAULT 0")
-            updates = []
-            for circuit_id, blob in conn.execute(f"SELECT id, graph FROM {TABLE_NAME}"):
-                if version == 0:
-                    graph = serializable_to_circuit(pickle.loads(blob))
-                else:
-                    graph = bytes_to_circuit(blob)
-                num_not_gates = sum(1 for _, gate in graph.nodes(data='gate') if gate == 'NOT')
-                updates.append((num_not_gates, circuit_to_bytes(graph), circuit_id))
-            conn.executemany(
-                f"UPDATE {TABLE_NAME} SET num_gates_core = num_gates_total - ?, graph = ? WHERE id = ?",
-                updates)
-            conn.execute(f"PRAGMA user_version = {FORMAT_VERSION}")
+                changes.append("split num_gates into num_gates_core and num_gates_total")
+            if rewrite_rows:
+                updates = []
+                for circuit_id, blob in conn.execute(f"SELECT id, graph FROM {TABLE_NAME}"):
+                    if version == 0:
+                        graph = serializable_to_circuit(pickle.loads(blob))
+                    else:
+                        graph = bytes_to_circuit(blob)
+                    num_not_gates = sum(1 for _, gate in graph.nodes(data='gate') if gate == 'NOT')
+                    updates.append((num_not_gates, circuit_to_bytes(graph), circuit_id))
+                conn.executemany(
+                    f"UPDATE {TABLE_NAME} SET num_gates_core = num_gates_total - ?, graph = ? WHERE id = ?",
+                    updates)
+                if version < FORMAT_VERSION:
+                    changes.append(f"re-encoded {len(updates)} graphs compactly")
+                conn.execute(f"PRAGMA user_version = {FORMAT_VERSION}")
+            if add_index:
+                conn.execute(INDEX_SCHEMA)
+                changes.append("added the query index")
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")
             raise
-        # Rewriting every row leaves pages partly empty (filling in num_gates_core alone made
-        # enumerate_all_4-7 about 12% larger, and shorter graph blobs leave even more gaps).
-        # VACUUM repacks the file.
-        conn.execute("VACUUM")
-        return len(updates)
+        if rewrite_rows:
+            # Rewriting every row leaves pages partly empty (filling in num_gates_core alone made
+            # enumerate_all_4-7 about 12% larger, and shorter graph blobs leave even more gaps).
+            # VACUUM repacks the file.
+            conn.execute("VACUUM")
+        return changes
     finally:
         conn.close()

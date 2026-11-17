@@ -219,7 +219,11 @@ def old_db_path(tmp_path):
 
 
 def test_upgrade_splits_num_gates(old_db_path):
-    assert circuit_database.upgrade(old_db_path) == 2
+    assert circuit_database.upgrade(old_db_path) == [
+        "split num_gates into num_gates_core and num_gates_total",
+        "re-encoded 2 graphs compactly",
+        "added the query index",
+    ]
 
     with CircuitDatabase(old_db_path, read_only=True) as db:
         tree, with_nots = db.query()
@@ -249,13 +253,13 @@ def test_upgraded_database_accepts_new_circuits(old_db_path):
 
 def test_upgrade_twice_does_nothing_the_second_time(old_db_path):
     circuit_database.upgrade(old_db_path)
-    assert circuit_database.upgrade(old_db_path) == 0
+    assert circuit_database.upgrade(old_db_path) == []
 
 
 def test_upgrade_current_database_does_nothing(tmp_path):
     path = str(tmp_path / "new.sqlite")
     circuit_database.create(path)
-    assert circuit_database.upgrade(path) == 0
+    assert circuit_database.upgrade(path) == []
 
 
 def test_upgrade_missing_file_raises(tmp_path):
@@ -294,7 +298,7 @@ def test_upgrade_while_another_program_reads_fails_fast_and_changes_nothing(old_
     finally:
         reader.close()
 
-    assert circuit_database.upgrade(old_db_path) == 2       # works once the reader is gone
+    assert circuit_database.upgrade(old_db_path)            # works once the reader is gone
 
 
 # ── format version ──────────────────────────────────────────────────────────────────────────
@@ -356,7 +360,7 @@ def test_upgrade_converts_graphs_when_gate_counts_are_already_split(old_db_path)
     conn.commit()
     conn.close()
 
-    assert circuit_database.upgrade(old_db_path) == 2
+    assert circuit_database.upgrade(old_db_path) == ["re-encoded 2 graphs compactly", "added the query index"]
     with CircuitDatabase(old_db_path, read_only=True) as db:
         tree, with_nots = db.query()
     assert (tree['num_gates_core'], tree['num_gates_total']) == (1, 1)
@@ -372,3 +376,58 @@ def test_graphs_are_stored_compactly(tmp_path):
     (blob,) = conn.execute("SELECT graph FROM circuits").fetchone()
     conn.close()
     assert blob == circuit_database.circuit_to_bytes(_with_source_nots())
+
+
+# ── query index ─────────────────────────────────────────────────────────────────────────────
+
+def _has_index(path):
+    conn = sqlite3.connect(path)
+    try:
+        return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+                            (circuit_database.INDEX_NAME,)).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def test_new_database_has_query_index(tmp_path):
+    path = str(tmp_path / "new.sqlite")
+    circuit_database.create(path)
+    assert _has_index(path)
+
+
+def test_typical_question_query_uses_index(tmp_path):
+    path = str(tmp_path / "new.sqlite")
+    circuit_database.create(path)
+    conn = sqlite3.connect(path)
+    plan = conn.execute(
+        "EXPLAIN QUERY PLAN SELECT * FROM circuits WHERE num_inputs = 3 "
+        "AND num_gates_core BETWEEN 3 AND 4 AND max_shared_subcircuit_depth = 0").fetchall()
+    conn.close()
+    assert circuit_database.INDEX_NAME in plan[0][-1]
+
+
+def test_upgrade_adds_missing_index_to_current_database(tmp_path):
+    path = str(tmp_path / "new.sqlite")
+    circuit_database.create(path)
+    with CircuitDatabase(path) as db:
+        db.add(_with_source_nots())
+    conn = sqlite3.connect(path)
+    conn.execute(f"DROP INDEX {circuit_database.INDEX_NAME}")
+    conn.commit()
+    conn.close()
+
+    assert circuit_database.upgrade(path) == ["added the query index"]
+    assert _has_index(path)
+    with CircuitDatabase(path, read_only=True) as db:
+        assert db.get_random_entry(num_inputs=2, num_gates_core=3)['num_gates_total'] == 5
+
+
+def test_database_without_index_still_opens(tmp_path):
+    path = str(tmp_path / "new.sqlite")
+    circuit_database.create(path)
+    conn = sqlite3.connect(path)
+    conn.execute(f"DROP INDEX {circuit_database.INDEX_NAME}")
+    conn.commit()
+    conn.close()
+    with CircuitDatabase(path, read_only=True) as db:
+        assert db.query() == []

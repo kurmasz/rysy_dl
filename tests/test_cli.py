@@ -642,14 +642,14 @@ def test_cmd_generate_circuits_dry_run_passes_ranges_without_db(monkeypatch):
 # ── upgrade-db ───────────────────────────────────────────────────────────────
 
 def test_upgrade_db_reports_each_database(tmp_path, monkeypatch, capsys):
-    upgraded = {'old.sqlite': 7, 'new.sqlite': 0}
+    upgraded = {'old.sqlite': ['re-encoded 7 graphs compactly', 'added the query index'], 'new.sqlite': []}
     monkeypatch.setattr(cli.circuit_database, 'upgrade', lambda path: upgraded[os.path.basename(path)])
     monkeypatch.setattr(sys, 'argv', ['rysy_dl', 'upgrade-db', 'old.sqlite', 'new.sqlite'])
 
     cli.main()
 
     out = capsys.readouterr().out
-    assert 'old.sqlite: upgraded 7 circuits' in out
+    assert 'old.sqlite: re-encoded 7 graphs compactly; added the query index' in out
     assert 'new.sqlite: already up to date' in out
 
 
@@ -657,7 +657,7 @@ def test_upgrade_db_missing_file_exits_after_trying_the_rest(tmp_path, monkeypat
     def upgrade(path):
         if 'missing' in path:
             raise FileNotFoundError(f"Circuit database not found: {path}")
-        return 0
+        return []
     monkeypatch.setattr(cli.circuit_database, 'upgrade', upgrade)
     monkeypatch.setattr(sys, 'argv', ['rysy_dl', 'upgrade-db', 'missing.sqlite', 'ok.sqlite'])
 
