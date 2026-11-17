@@ -15,6 +15,10 @@ downstream it is given a vertical *channel*, an x of its own:
 
 A net with one consumer is the same picture with one stub; if the output is
 level with the pin, the bus has no length and the wire is a straight line.
+
+Channel 0 is the one nearest the consumers. The gap is exactly wide enough
+(see `placement.gap_width`) for the last channel to clear the outputs upstream
+by the same margin that channel 0 clears the pins.
 """
 
 from .state import FLOAT_NOISE, Wire

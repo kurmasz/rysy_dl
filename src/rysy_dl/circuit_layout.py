@@ -63,7 +63,7 @@ def compute_layout(netlist, spacing=None):
     ordering.order_layers(state)
     ordering.assign_pins(state)
 
-    placement.set_layer_spacing(state)
+    placement.set_layer_positions(state)
     placement.place_nodes(state)
 
     refinement.align_fanout_nodes(state)

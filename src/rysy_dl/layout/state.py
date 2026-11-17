@@ -74,7 +74,7 @@ class LayoutState:
     pin_index: dict = field(default_factory=dict)   # (pred, consumer) -> which input pin (0 = highest)
 
     # placement
-    x_spacing: float = 0.0                          # distance between adjacent layers
+    layer_x: list = field(default_factory=list)     # layer_x[k] = the x of layer k
     y: dict = field(default_factory=dict)           # node -> height
 
     # routing
@@ -113,7 +113,7 @@ class LayoutState:
 
     def x(self, node):
         """The sink is at x = 0; everything else is to its left."""
-        return -self.layer_of[node] * self.x_spacing
+        return self.layer_x[self.layer_of[node]]
 
     @property
     def position(self):

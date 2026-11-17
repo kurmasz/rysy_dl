@@ -207,3 +207,38 @@ def test_nets_level_with_each_others_pins_are_moved_apart():
         assert heights == sorted(heights)                # still in order
         for below, above in zip(layer, layer[1:]):       # and no closer than allowed
             assert state.y[above] - state.y[below] >= placement.min_gap(state, below, above) - 1e-9
+
+
+# ── layer spacing ────────────────────────────────────────────────────────────
+
+def test_each_gap_is_only_as_wide_as_its_own_wires_need():
+    # Four sources feed two gates, which feed the sink: four nets cross the
+    # gap on the left, two the gap on the right.
+    netlist = netlist_from(
+        {0: 'src', 1: 'src', 2: 'src', 3: 'src', 4: 'AND', 5: 'AND', 6: 'AND'},
+        [(0, 4), (1, 4), (2, 5), (3, 5), (4, 6), (5, 6)])
+    state = assert_valid(netlist)
+    spacing = state.spacing
+    gate, margins = 1.85, 2 * spacing.pin_to_vertical_spacing
+    assert state.layer_x[0] == 0.0
+    assert state.layer_x[0] - state.layer_x[1] == pytest.approx(gate + margins + 1 * spacing.wire_spacing)
+    assert state.layer_x[1] - state.layer_x[2] == pytest.approx(gate + margins + 3 * spacing.wire_spacing)
+
+
+def test_every_channel_clears_the_pins_and_the_outputs_either_side_of_it():
+    netlist = netlist_from(
+        {0: 'src', 1: 'src', 2: 'src', 3: 'NOR', 4: 'OR', 5: 'AND', 6: 'NAND', 7: 'XOR',
+         8: 'NOT', 9: 'NOT'},
+        [(0, 3), (0, 5), (0, 8), (1, 4), (1, 5), (1, 6), (2, 9), (3, 5), (4, 7), (5, 7),
+         (6, 3), (6, 4), (8, 6), (9, 6)])
+    state = assert_valid(netlist)
+    margin = state.spacing.pin_to_vertical_spacing
+    buses = [wire for wire in state.wires if wire.start[0] == wire.end[0]]
+    assert buses
+    for wire in buses:
+        x = wire.start[0]
+        k = min(k for k in range(1, len(state.layers)) if state.layer_x[k] < x)     # the gap it is in
+        pins_x = state.layer_x[k - 1] - 1.85
+        outputs_x = max(state.output_xy(node)[0] for node in state.layers[k])
+        assert x <= pins_x - margin + 1e-9
+        assert x >= outputs_x + margin - 0.05 - 1e-9    # an OR's output overhangs by 0.05

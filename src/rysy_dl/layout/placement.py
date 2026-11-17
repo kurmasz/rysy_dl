@@ -10,16 +10,27 @@ wishes would put two nodes too close together, `_spread` settles it.
 from .gates import reference_width
 
 
-def set_layer_spacing(state):
-    """Set state.x_spacing, the distance from one layer to the next: a gate's
-    width, plus room in the gap between layers for one vertical channel per
-    net, with a margin either side. Every gap gets the width the busiest one
-    needs."""
+def gap_width(state, layer):
+    """The distance from `layer` to the layer downstream of it: that layer's
+    gates, then room for one vertical channel per net leaving `layer`, with a
+    margin either side of the channels.
+
+    Each gap is as wide as its own nets need and no wider. A gap carrying two
+    wires is not made to match one carrying eight.
+    """
     spacing = state.spacing
-    most_channels = max(len(layer) for layer in state.layers)
-    state.x_spacing = (spacing.wire_spacing * (most_channels - 1)
-                       + 2 * spacing.pin_to_vertical_spacing
-                       + reference_width())
+    channels = len(state.layers[layer])
+    return (reference_width()
+            + 2 * spacing.pin_to_vertical_spacing
+            + spacing.wire_spacing * (channels - 1))
+
+
+def set_layer_positions(state):
+    """Set state.layer_x: the sink's layer at x = 0, and each layer upstream
+    one gap further left."""
+    state.layer_x = [0.0]
+    for layer in range(1, len(state.layers)):
+        state.layer_x.append(state.layer_x[-1] - gap_width(state, layer))
 
 
 def node_height(state, node):
