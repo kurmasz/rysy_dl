@@ -8,7 +8,7 @@ instead of by eye.
 Every metric here is "lower is better".
 
     crossings     Places where two wires visibly cross. Measured on the wire
-                  segments actually drawn -- stub, vertical channel, and
+                  segments of the finished layout -- stub, vertical channel, and
                   horizontal run -- not on an idealised straight line between
                   layers, because which wires cross depends on the vertical
                   channel each one is routed through, and channel assignment
@@ -71,11 +71,10 @@ import statistics
 import sys
 
 import schemdraw
-import schemdraw.elements as elm
 
-from .circuit_layout import (_output_height, _wire_paths, assign_source_labels,
-                             build_layout)
+from .circuit_layout import assign_source_labels, compute_layout
 from .circuit_database import CircuitDatabase
+from .layout.refinement import path_heights, wire_paths
 
 # Positions are in drawing units of order 1, so anything below this is
 # floating-point noise rather than a real gap, bend, or overlap.
@@ -105,19 +104,8 @@ HIGHER_IS_BETTER = ('straight_wire_pct', 'collision_free_pct', 'crossing_free_pc
 
 
 def drawn_segments(state):
-    """The wire segments actually drawn, as ((x1, y1), (x2, y2)) pairs.
-
-    Gate bodies and labels are their own element types, so every schemdraw
-    Line on the drawing is a piece of wire.
-    """
-    segments = []
-    for element in state.diagram.elements:
-        if isinstance(element, elm.Line):
-            start = element.absanchors['start']
-            end = element.absanchors['end']
-            segments.append(((float(start[0]), float(start[1])),
-                             (float(end[0]), float(end[1]))))
-    return segments
+    """The wire segments of the layout, as ((x1, y1), (x2, y2)) pairs."""
+    return [(wire.start, wire.end) for wire in state.wires]
 
 
 def count_crossings(segments):
@@ -173,14 +161,8 @@ def count_collisions(segments, clearance=COLLISION_CLEARANCE):
 
 
 def junction_points(state):
-    """Where the drawing puts a junction dot -- a real electrical connection."""
-    points = []
-    for element in state.diagram.elements:
-        if isinstance(element, elm.Dot):
-            anchors = element.absanchors
-            point = anchors.get('center', anchors.get('start'))
-            points.append((float(point[0]), float(point[1])))
-    return points
+    """Where the layout puts a junction dot -- a real electrical connection."""
+    return list(state.dots)
 
 
 def crossing_points(segments):
@@ -211,33 +193,17 @@ def count_crowded_junctions(state, segments, clearance=JUNCTION_CLEARANCE):
     return total
 
 
-def _input_pin_height(state, consumer, pred):
-    """Height of the specific input pin of `consumer` that `pred`'s wire lands on.
-
-    Mirrors the pin assignment _route_stubs performs -- predecessors sorted by
-    height, the highest into in1 -- so this agrees with what was drawn.
-    """
-    predecessors = sorted(state.netlist.predecessors(consumer),
-                          key=lambda p: state.position[p], reverse=True)
-    gate = state.gate_elements[consumer]
-    return float(getattr(gate, f'in{predecessors.index(pred) + 1}')[1])
-
-
 def count_jogs(state):
     """Return (total jogs, worst single wire, percent of wires drawn straight).
 
-    Heights are taken at the real pins at each end. Dummy waypoints in the
-    middle pass a wire straight through (their in and out anchors share a
-    height), so their node position is the wire's height there.
+    Heights are taken at the real pins at each end -- the output pin a wire
+    leaves from and the input pin it lands on -- and at each dummy waypoint in
+    between.
     """
     total = worst = straight = wires = 0
-    for path in _wire_paths(state.netlist):
-        heights = [_output_height(state, path[0])]
-        heights.extend(state.position[node][1] for node in path[1:-1])
-        heights.append(_input_pin_height(state, path[-1], path[-2]))
-
-        jogs = sum(1 for i in range(len(heights) - 1)
-                   if abs(heights[i] - heights[i + 1]) > EPS)
+    for path in wire_paths(state.netlist):
+        heights = path_heights(state, path)
+        jogs = sum(1 for a, b in zip(heights, heights[1:]) if abs(a - b) > EPS)
         total += jogs
         worst = max(worst, jogs)
         wires += 1
@@ -249,13 +215,17 @@ def count_jogs(state):
 
 def layout_metrics(netlist):
     """Lay out `netlist` and return a dict of quality metrics (see module docstring)."""
-    state = build_layout(netlist)
+    return metrics_from_state(compute_layout(netlist))
+
+
+def metrics_from_state(state):
+    """Quality metrics for a LayoutState from `compute_layout` or `build_layout`."""
     segments = drawn_segments(state)
     jogs, worst, straight_pct = count_jogs(state)
 
     wire_length = sum(abs(a[0] - b[0]) + abs(a[1] - b[1]) for a, b in segments)
-    xs = [p[0] for p in state.position.values()]
-    ys = [p[1] for p in state.position.values()]
+    xs = [state.x(node) for node in state.y]
+    ys = list(state.y.values())
     width = max(xs) - min(xs)
     height = max(ys) - min(ys)
 
