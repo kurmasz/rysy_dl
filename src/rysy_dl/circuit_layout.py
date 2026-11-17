@@ -69,6 +69,7 @@ def compute_layout(netlist, spacing=None):
     refinement.align_fanout_nodes(state)
     refinement.straighten_wires(state)
     refinement.separate_wire_tracks(state)
+    refinement.resolve_track_conflicts(state)
 
     routing.route(state)
     return state

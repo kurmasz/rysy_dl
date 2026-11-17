@@ -26,9 +26,11 @@ the changed circuits side by side, most-regressed first, for judging by eye.
 For a change that is meant to leave the drawings alone, add
 `--expect-identical`, which makes any difference a failure.
 
-The corpus is a seeded sample of a circuit database. Each sampled circuit is
+The corpus is a seeded sample of one or more circuit databases (`--db`, which
+may be repeated; a wider corpus finds faults a narrow one never meets). Each
+sampled circuit is
 laid out as stored and again with gates assigned at random and NOT gates
-inserted (as `Circuit.randomize` does for a real exercise), since the stored
+inserted (as `Circuit.randomize` does for a real exercise), since the packaged
 circuits alone are AND-only and would never exercise a NOT, an XOR, or a mix
 of gate widths. The `.pkl` examples in `test_graphs/` are included when that
 directory is present.
@@ -74,37 +76,44 @@ METRIC_FIELDS = REPORTED + ('straight_wire_pct',)
 # The corpus
 # --------------------------------------------------------------------------
 
-def corpus(db_path=None, limit=DEFAULT_LIMIT, seed=DEFAULT_SEED,
+def corpus(db_paths=(None,), limit=DEFAULT_LIMIT, seed=DEFAULT_SEED,
            variants=DEFAULT_VARIANTS, examples_dir=EXAMPLES_DIR):
     """Yield (key, netlist) for every circuit in the corpus.
 
-    The same arguments always yield the same circuits under the same keys,
-    which is what lets two snapshots be compared circuit by circuit. Gate
-    randomisation draws from the global `random` module, so it is reseeded per
-    circuit: each circuit's variants then don't depend on which others were
-    sampled before it.
+    `db_paths` lists the databases to sample (`limit` circuits from each);
+    None means the packaged one. The same arguments always yield the same
+    circuits under the same keys, which is what lets two snapshots be compared
+    circuit by circuit. Gate randomisation draws from the global `random`
+    module, so it is reseeded per circuit: each circuit's variants then don't
+    depend on which others were sampled before it.
     """
     if examples_dir and os.path.isdir(examples_dir):
         for path in sorted(glob.glob(os.path.join(examples_dir, '*.p*'))):
             with open(path, 'rb') as handle:
                 yield f'file:{os.path.basename(path)}', pickle.load(handle)
 
-    with CircuitDatabase(db_path, read_only=True) as db:
-        ids = [row['id'] for row in db._open_conn().execute("SELECT id FROM circuits ORDER BY id")]
-        if limit and limit < len(ids):
-            ids = sorted(random.Random(seed).sample(ids, limit))
+    for db_path in db_paths:
+        name = 'packaged' if db_path is None else os.path.splitext(os.path.basename(db_path))[0].lstrip('@')
+        with CircuitDatabase(db_path, read_only=True) as db:
+            ids = [row['id'] for row in db._open_conn().execute("SELECT id FROM circuits ORDER BY id")]
+            if limit and limit < len(ids):
+                ids = sorted(random.Random(seed).sample(ids, limit))
 
-        for circuit_id in ids:
-            stored = db.get_entry(circuit_id)['graph']
-            for variant in range(variants + 1):
-                netlist = stored.copy()
-                if variant:
-                    random.seed(f'{seed}:{circuit_id}:{variant}')
-                    has_nots = any(gate == 'NOT' for _, gate in netlist.nodes(data='gate'))
-                    Circuit(netlist).randomize(source_nots=not has_nots)
-                # Label the way the exercise generator does: top to bottom.
-                assign_source_labels(netlist, source_order=sources_top_to_bottom(netlist))
-                yield f'db:{circuit_id}:{"stored" if not variant else f"random{variant}"}', netlist
+            for circuit_id in ids:
+                stored = db.get_entry(circuit_id)['graph']
+                for variant in range(variants + 1):
+                    netlist = stored.copy()
+                    if variant:
+                        random.seed(f'{seed}:{name}:{circuit_id}:{variant}')
+                        has_nots = any(gate == 'NOT' for _, gate in netlist.nodes(data='gate'))
+                        try:
+                            Circuit(netlist).randomize(source_nots=not has_nots)
+                        except AssertionError:
+                            continue    # no acceptable random gate assignment exists for this shape
+                    # Label the way the exercise generator does: top to bottom.
+                    assign_source_labels(netlist, source_order=sources_top_to_bottom(netlist))
+                    kind = 'stored' if not variant else f'random{variant}'
+                    yield f'{name}:{circuit_id}:{kind}', netlist
 
 
 # --------------------------------------------------------------------------
@@ -416,10 +425,13 @@ def main(argv=None):
     snapshot_parser = commands.add_parser(
         'snapshot', help="Lay out the corpus and record the results in a directory.")
     snapshot_parser.add_argument('directory')
-    snapshot_parser.add_argument('--db', default=None,
-                                 help="Circuit database to sample (default: the packaged one).")
+    snapshot_parser.add_argument('--db', action='append', default=None,
+                                 help="Circuit database to sample; repeat to sample several "
+                                      "(default: the packaged one). A '@name' path is resolved "
+                                      "against the rysy_dl.db package.")
     snapshot_parser.add_argument('--limit', type=int, default=DEFAULT_LIMIT,
-                                 help=f"Circuits to sample; 0 takes them all (default: {DEFAULT_LIMIT}).")
+                                 help=f"Circuits to sample from each database; 0 takes them all "
+                                      f"(default: {DEFAULT_LIMIT}).")
     snapshot_parser.add_argument('--seed', type=int, default=DEFAULT_SEED)
     snapshot_parser.add_argument('--variants', type=int, default=DEFAULT_VARIANTS,
                                  help="Randomly gated versions of each sampled circuit, in addition "
@@ -439,7 +451,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.command == 'snapshot':
-        snapshot = take_snapshot(args.directory, images=not args.no_images, db_path=args.db,
+        snapshot = take_snapshot(args.directory, images=not args.no_images,
+                                 db_paths=tuple(args.db) if args.db else (None,),
                                  limit=args.limit, seed=args.seed, variants=args.variants)
         print_summary(snapshot)
         print(f"\nwrote {os.path.join(args.directory, 'snapshot.json')}")

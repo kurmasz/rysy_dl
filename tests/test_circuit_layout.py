@@ -11,7 +11,7 @@ import pytest
 import schemdraw
 
 from rysy_dl.circuit_layout import build_layout, compute_layout
-from rysy_dl.layout import ordering
+from rysy_dl.layout import ordering, placement, routing
 from rysy_dl.layout_validity import check_layout
 
 
@@ -125,3 +125,85 @@ def test_long_connections_are_broken_into_single_layer_hops():
     for pred, consumer in state.netlist.edges():
         assert state.layer_of[pred] - state.layer_of[consumer] == 1
     assert sum(1 for node in state.netlist if state.is_dummy(node)) == 1
+
+
+# ── wires sharing a track ────────────────────────────────────────────────────
+#
+# One net's run (from its output to its channel) lies along another net's stub
+# (from its channel to a pin) when the output is level with the pin and the
+# first net's channel is the further right. See routing.must_be_left_of.
+
+def nets(**heights):
+    """{net: (output height, [pin heights])} from net=(out, pin, pin, ...)."""
+    return {net: (values[0], list(values[1:])) for net, values in heights.items()}
+
+
+def test_must_be_left_of_pairs_an_output_with_a_level_pin_of_another_net():
+    gap = nets(a=(1.0, 3.0), b=(2.0, 1.02), c=(5.0, 5.0))
+    # a's output (1.0) is level with b's pin (1.02). c is level only with its own pin.
+    assert routing.must_be_left_of(gap, clearance=0.1) == {('a', 'b')}
+
+
+def test_channel_order_keeps_a_run_off_another_nets_stub():
+    gap = nets(a=(1.0, 3.0), b=(2.0, 1.02))
+    for start in (['a', 'b'], ['b', 'a']):
+        (shared_tracks, _), order = routing.best_channel_order(gap, start, clearance=0.1)
+        assert shared_tracks == 0
+        assert order.index('a') > order.index('b')      # a's channel is the further left
+
+
+def test_channel_order_prefers_a_crossing_to_a_shared_track():
+    # Here the only order with no shared track has one more crossing than the
+    # best of the rest, and is still the right choice.
+    gap = nets(a=(0.0, 6.0, 0.0), b=(3.0, 0.0), c=(2.0, 6.0, 3.0))
+    left_of = routing.must_be_left_of(gap, 0.1)
+    assert routing._gap_cost(gap, ['a', 'c', 'b'], left_of) == (1, 2)
+    assert routing._gap_cost(gap, ['c', 'b', 'a'], left_of) == (0, 3)
+    for start in (['a', 'c', 'b'], ['a', 'b', 'c'], ['b', 'a', 'c']):
+        assert routing.best_channel_order(gap, start, clearance=0.1) == ((0, 3), ['c', 'b', 'a'])
+
+
+def test_contradictory_requirements_leave_one_shared_track_for_routing():
+    # Each net's output is level with the other's pin: no order satisfies both.
+    gap = nets(a=(1.0, 2.0), b=(2.0, 1.0))
+    (shared_tracks, _), _ = routing.best_channel_order(gap, ['a', 'b'], clearance=0.1)
+    assert shared_tracks == 1
+
+
+def test_a_long_chain_of_requirements_is_honoured_from_a_bad_start():
+    # a left of b left of c left of d (each output is level with the next
+    # net's pin), starting from exactly the wrong order. Channel 0, the first
+    # in the list, is the furthest right.
+    gap = nets(a=(0.0, 9.0), b=(1.0, 0.0), c=(2.0, 1.0), d=(3.0, 2.0))
+    assert routing.must_be_left_of(gap, 0.1) == {('a', 'b'), ('b', 'c'), ('c', 'd')}
+    (shared_tracks, _), order = routing.best_channel_order(gap, ['a', 'b', 'c', 'd'], clearance=0.1)
+    assert shared_tracks == 0 and order == ['d', 'c', 'b', 'a']
+
+
+def test_gate_output_level_with_another_nets_pin_is_not_drawn_as_one_wire():
+    # From the corpus: a NOT gate's output came out 0.002 below the pin that an
+    # unrelated wire was heading for, and its channel was the further right, so
+    # the two were drawn as a single line -- a drawing of a different circuit.
+    netlist = netlist_from(
+        {0: 'src', 1: 'src', 2: 'src', 3: 'NOR', 4: 'OR', 5: 'AND', 6: 'NAND', 7: 'XOR',
+         8: 'NOT', 9: 'NOT'},
+        [(0, 3), (0, 5), (0, 8), (1, 4), (1, 5), (1, 6), (2, 9), (3, 5), (4, 7), (5, 7),
+         (6, 3), (6, 4), (8, 6), (9, 6)])
+    assert_valid(netlist)
+
+
+def test_nets_level_with_each_others_pins_are_moved_apart():
+    # From the corpus: two tightly packed nets, each level with a pin of the
+    # other, so that no channel order parts them and one has to be moved.
+    netlist = netlist_from(
+        {0: 'XOR', 1: 'NOR', 2: 'OR', 3: 'NAND', 4: 'src', 5: 'src', 6: 'AND', 7: 'AND',
+         8: 'NOT', 9: 'NOT'},
+        [(0, 3), (0, 6), (1, 7), (2, 7), (3, 7), (4, 2), (4, 8), (5, 0), (5, 1), (5, 9),
+         (6, 1), (6, 2), (8, 0), (8, 1), (8, 3), (8, 6), (9, 2), (9, 3), (9, 6)])
+    state = assert_valid(netlist)
+    for layer in state.layers[1:]:
+        assert routing.gap_cost(state, layer)[0] == 0
+        heights = [state.y[node] for node in layer]
+        assert heights == sorted(heights)                # still in order
+        for below, above in zip(layer, layer[1:]):       # and no closer than allowed
+            assert state.y[above] - state.y[below] >= placement.min_gap(state, below, above) - 1e-9

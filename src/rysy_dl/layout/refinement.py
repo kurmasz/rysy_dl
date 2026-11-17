@@ -9,6 +9,7 @@ easy to fix, once every node has a height:
     align_fanout_nodes     a node feeding several gates sits level with none
     straighten_wires       a long wire takes a step at every layer it crosses
     separate_wire_tracks   two unrelated wires run along the same track
+    resolve_track_conflicts  ... and no choice of channels can part them
 
 Each pass moves one node at a time, never past its neighbours in its layer
 (so the crossing-minimal order survives), and keeps a move only if it helps.
@@ -16,6 +17,7 @@ Each pass moves one node at a time, never past its neighbours in its layer
 
 import contextlib
 
+from . import routing
 from .gates import DUMMY
 from .placement import min_gap
 from .state import FLOAT_NOISE
@@ -253,3 +255,83 @@ def separate_wire_tracks(state):
 
             if nearest is not None:
                 state.y[node] = nearest
+
+
+def _push_plan(state, node, height):
+    """{node: new height} for moving `node` to `height` and pushing along any
+    neighbours in its layer that would otherwise be left too close to it --
+    and theirs in turn. The layer's order, and every minimum gap, survive."""
+    layer = state.layers[state.layer_of[node]]
+    index = layer.index(node)
+    plan = {node: height}
+    if height > state.y[node]:
+        for above, below in zip(layer[index + 1:], layer[index:]):
+            needed = plan[below] + min_gap(state, below, above)
+            if state.y[above] >= needed - FLOAT_NOISE:
+                break
+            plan[above] = needed
+    else:
+        for below, above in zip(reversed(layer[:index]), reversed(layer[:index + 1])):
+            needed = plan[above] - min_gap(state, below, above)
+            if state.y[below] <= needed + FLOAT_NOISE:
+                break
+            plan[below] = needed
+    return plan
+
+
+def resolve_track_conflicts(state):
+    """Move a node where two nets would share a track whatever channels
+    routing gave them.
+
+    Routing keeps one net's run off another's stub by putting the first net's
+    channel to the left of the second's (see `routing.must_be_left_of`), which
+    costs nothing. That fails only when the requirements contradict each
+    other -- each of two nets has its output level with a pin of the other, so
+    each would have to be left of the other. Then one of them has to move.
+
+    For each gap that has such a contradiction, this tries moving each net
+    involved to just clear of each pin it is near, pushing its neighbours
+    along if they are in the way (these nodes are usually packed tight, which
+    is how they came to be level with each other's pins). It takes the move
+    that leaves the fewest shared tracks, then the fewest crossings, then the
+    fewest bends, then moves the fewest gates, the shortest distance. A gate's
+    pins move with it, so the gap upstream is counted too.
+    """
+    netlist = state.netlist
+    clearance = state.spacing.wire_clearance
+    paths = wire_paths(netlist)
+
+    def cost_around(k):
+        """(shared tracks, crossings) over the gaps either side of layer k."""
+        costs = [routing.gap_cost(state, state.layers[gap])
+                 for gap in (k, k + 1) if gap < len(state.layers)]
+        return tuple(sum(values) for values in zip(*costs))
+
+    for k in range(1, len(state.layers)):
+        layer = state.layers[k]
+        for _ in layer:     # each move settles at least one pair, so this is ample
+            if routing.gap_cost(state, layer)[0] == 0:
+                break
+            nets = routing.gap_nets(state, layer)
+            involved = {net for pair in routing.must_be_left_of(nets, clearance - FLOAT_NOISE)
+                        for net in pair}
+
+            best = cost_around(k) + (_jogs(state, paths), 0, 0.0)
+            best_plan = None
+            for node in sorted(involved, key=layer.index):
+                for other, (_, pin_ys) in nets.items():
+                    if other == node:
+                        continue
+                    for pin_y in pin_ys:
+                        for candidate in (pin_y + clearance, pin_y - clearance):
+                            plan = _push_plan(state, node, candidate)
+                            gates_moved = sum(1 for moved in plan if not state.is_weightless(moved))
+                            distance = sum(abs(height - state.y[moved]) for moved, height in plan.items())
+                            with _moved(state, plan):
+                                result = cost_around(k) + (_jogs(state, paths), gates_moved, distance)
+                            if result < best:
+                                best, best_plan = result, plan
+
+            if best_plan is None:
+                break
+            state.y.update(best_plan)
