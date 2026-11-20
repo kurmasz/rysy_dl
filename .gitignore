@@ -20,6 +20,7 @@ temp_out*
 # Databases other than the packaged default
 src/rysy_dl/db/*.sqlite
 !src/rysy_dl/db/circuit_templates_n3-8.sqlite
+!src/rysy_dl/db/concrete_circuits_n4-8.sqlite
 
 # Editors / OS
 *~

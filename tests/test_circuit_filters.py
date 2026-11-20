@@ -19,6 +19,7 @@ from rysy_dl.circuit_filters import (
     no_collapsable_children,
     no_visible_absorption,
     no_constant_subexpressions,
+    no_redundant_gate_inputs,
     valid_xor_xnor_fan_in_filter,
 )
 
@@ -796,3 +797,56 @@ def test_no_visible_absorption_never_rejects_what_no_absorption_accepts():
             elif not no_visible_absorption(graph):
                 both_reject += 1
     assert both_reject > 0  # the comparison actually exercised rejecting circuits
+
+
+# ── test no_redundant_gate_inputs ────────────────────────────────────────────────────────────────────
+
+
+def test_no_redundant_gate_inputs_empty_graph_is_true():
+    assert no_redundant_gate_inputs(nx.DiGraph()) is True
+
+
+@pytest.mark.parametrize("expression", [
+    "A*B + C'",
+    "(A + B)*C",
+    "A ^ B",
+    "A*B + A'*C",
+    "A*B + A*C",            # removing either A changes the function
+    "(A + B)*(A + C)",      # = A + B*C, but no single wire can be removed
+    "(A*B)' + C",
+])
+def test_no_redundant_gate_inputs_accepts_circuits_without_redundant_inputs(expression):
+    assert no_redundant_gate_inputs(_netlist(expression)) is True
+
+
+@pytest.mark.parametrize("expression", [
+    "A + A*B",              # visible absorption
+    "(A*B)'*A'*B'",         # absorption only after De Morgan: A'*B' implies (A*B)'
+    "(A*B)' + A' + B'",
+    "A + B*(C + A*D)",      # = A + B*C: the A*D input of the inner OR is redundant, though no
+                            #   single gate has a term that absorbs another
+    "A + A'*B",             # = A + B: the A' input of the AND is redundant
+    "A*B + A'*C + B*C",     # consensus: B*C is redundant
+])
+def test_no_redundant_gate_inputs_rejects_redundant_inputs(expression):
+    assert no_redundant_gate_inputs(_netlist(expression)) is False
+
+
+@pytest.mark.parametrize("expression", [
+    "A + A*B", "A*(A + B)", "A' + A'*B", "A*B + A*B*C", "(A + B)*(A + B + C)", "A + B + A*C",
+    "A + (A' + B)'", "(A + B)' + A'", "A*(A'*B)'", "(A*B)'*A'",
+    "(A*B)' + (A*B)'*C", "A + B + (A + B)*C", "A*B*(A*B + C)", "(A + B)'*((A + B)' + C)",
+    "C*(A + A*(B + D))", "A*B + B*A",
+])
+def test_no_redundant_gate_inputs_rejects_everything_no_absorption_rejects(expression):
+    """Absorption at a gate makes the absorbed input redundant, so this filter is at least as
+    strict as no_absorption (these are no_absorption's rejection cases)."""
+    assert no_absorption(_netlist(expression)) is False
+    assert no_redundant_gate_inputs(_netlist(expression)) is False
+
+
+def test_no_redundant_gate_inputs_does_not_modify_graph():
+    netlist = _netlist("A + A*B")
+    before = sorted(netlist.edges())
+    no_redundant_gate_inputs(netlist)
+    assert sorted(netlist.edges()) == before

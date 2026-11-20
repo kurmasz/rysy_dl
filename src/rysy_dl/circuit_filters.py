@@ -239,10 +239,14 @@ def valid_xor_xnor_fan_in_filter(graph):
 
 
 # Constant subexpressions
-def _subexpression_truth_tables(graph):
+def _subexpression_truth_tables(graph, skip_edge=None):
     # Returns {node: truth table} for every node. Each truth table is an int whose bit i
     # is the node's output on input combination i (bit-parallel evaluation), so all
     # 2^n input combinations are evaluated in a single pass over the graph.
+    #
+    # skip_edge: an edge (u, v) to evaluate as if it were absent, i.e. v computes its gate
+    # over its other inputs only. The graph itself is not changed, so the inputs (and the
+    # truth-table rows) stay the same even if u is a source that feeds only v.
     sources = sorted(node for node in graph.nodes() if graph.in_degree(node) == 0)
     num_rows = 2 ** len(sources)
     all_ones = (1 << num_rows) - 1
@@ -256,7 +260,7 @@ def _subexpression_truth_tables(graph):
         if node in tables:
             continue
         gate = graph.nodes[node].get("gate")
-        values = [tables[child] for child in graph.predecessors(node)]
+        values = [tables[child] for child in graph.predecessors(node) if (child, node) != skip_edge]
 
         if gate in ("AND", "NAND"):
             result = all_ones
@@ -312,6 +316,38 @@ def every_input_affects_output(graph):
             (tables[out] ^ (tables[out] >> step)) & rows_with_bit_clear for out in outputs
         ):
             return False
+    return True
+
+
+def no_redundant_gate_inputs(graph):
+    # filters out circuits where some gate has an input that could be removed without changing
+    # the circuit's output, e.g.
+    #   A + A*B            -- the A*B input of the OR (absorption)
+    #   (A*B)'*A'*B'       -- the NAND input of the AND: A'*B' already implies (A*B)' (absorption
+    #                         that only shows after De Morgan, which no_visible_absorption accepts)
+    #   A + B*(C + A*D)    -- the A*D input of the inner OR: the output is A + B*C, though no
+    #                         single gate has two terms where one absorbs the other
+    # The circuit then has a smaller equivalent with the same structure minus one wire.
+    #
+    # This is stricter than no_absorption: absorption at a gate makes the absorbed input
+    # redundant, but an input can also be redundant because of what happens further down the
+    # circuit. On today's (output reads only sinks) circuits it rejects most circuits that pass
+    # the default filters; it is meant for databases generated with output_connections='any',
+    # whose many extra shapes leave plenty that pass.
+    #
+    # Only gates with two or more inputs are checked (removing a NOT's only input is not a
+    # smaller circuit). Removing one input of a 2-input gate leaves a 1-input gate: AND/OR/XOR
+    # of one input is that input; NAND/NOR/XNOR of one input is its complement.
+    tables, _ = _subexpression_truth_tables(graph)
+    outputs = [node for node in graph.nodes() if graph.out_degree(node) == 0 and graph.in_degree(node) > 0]
+    expected = [tables[out] for out in outputs]
+    for node in graph.nodes():
+        if graph.in_degree(node) < 2:
+            continue
+        for child in graph.predecessors(node):
+            without, _ = _subexpression_truth_tables(graph, skip_edge=(child, node))
+            if [without[out] for out in outputs] == expected:
+                return False
     return True
 
 

@@ -32,12 +32,16 @@ import shlex
 import shutil
 import signal
 import subprocess
+import itertools
 import time
 import networkx as nx
 from itertools import product
+from networkx.algorithms.isomorphism import DiGraphMatcher
 
 from .logging_config import get_logger
 from .graph_filters import (
+    edges_within_limits,
+    nauty_edges_within_limits,
     nauty_in_degrees_in_range,
     num_sources_in_range,
     non_source_in_degrees_in_range,
@@ -128,7 +132,7 @@ def find_nauty(nauty_dir=None):
     return paths
 
 
-def generate_nauty_digraphs(num_nodes, nauty_dir=None):
+def generate_nauty_digraphs(num_nodes, nauty_dir=None, max_edges=None):
     """
     Enumerate all non-isomorphic connected DAGs on `num_nodes` nodes using nauty.
 
@@ -150,6 +154,8 @@ def generate_nauty_digraphs(num_nodes, nauty_dir=None):
 
     :param num_nodes: Number of nodes in each generated graph.
     :param nauty_dir: Directory containing the nauty binaries, or None to search for them.
+    :param max_edges: If given, only DAGs with at most this many edges are generated (passed to
+                      ``geng`` as its ``0:max_edges`` edge range, so nauty never writes the rest).
     :yields: Each DAG as a string in nauty's text format, one at a time.
     :raises subprocess.CalledProcessError: If the ``geng | directg`` pipeline fails.
     """
@@ -158,13 +164,14 @@ def generate_nauty_digraphs(num_nodes, nauty_dir=None):
     geng = shlex.quote(nauty_paths["geng"])
     directg = shlex.quote(nauty_paths["directg"])
 
+    edge_range = "" if max_edges is None else f" 0:{max(int(max_edges), 0)}"
     # -o pipefail: Use the
     cmd = [
         "bash",
         "-o",
         "pipefail",
         "-c",
-        f"{geng} {num_nodes} | {directg} -aTq",
+        f"{geng} {num_nodes}{edge_range} | {directg} -aTq",
     ]
     # start_new_session=True makes `proc` the leader of its own process group, so geng and
     # directg (bash's children, not ours) can be killed together with it via os.killpg below.
@@ -251,6 +258,53 @@ def _add_single_sink(networkx_graph):
             networkx_graph.add_edge(node, num_of_nodes)
 
     return networkx_graph
+
+
+def _single_sink_extensions(networkx_graph, min_fan_in, max_fan_in):
+    """
+    Yield every way, up to isomorphism, of adding one output node to `networkx_graph` so that it
+    becomes the only sink: the output reads every node with out_degree 0 (as in
+    `_add_single_sink`) plus any subset S of the other nodes, with the output's fan-in
+    (sinks + |S|) in [min_fan_in, max_fan_in].
+
+    `_add_single_sink` is the S = {} case. It misses every circuit whose output reads a signal
+    (an input or a gate) that also feeds another gate, such as ``a XOR (a AND b)``.
+
+    No duplicates: removing a yielded graph's output gives back `networkx_graph`, so graphs from
+    different nauty DAGs are never isomorphic, and two subsets S, S' of the same DAG give
+    isomorphic graphs exactly when an automorphism of the DAG maps S onto S'. So each subset is
+    kept only if it is the first of its orbit under the DAG's automorphisms. (The automorphisms
+    are computed only for DAGs that have a non-empty subset to try.)
+
+    The input graph is not modified; each yielded graph is a new copy whose output node is
+    ``len(networkx_graph)``.
+    """
+    sinks = [v for v in networkx_graph if networkx_graph.out_degree(v) == 0]
+    others = [v for v in networkx_graph if networkx_graph.out_degree(v) > 0]
+    output = len(networkx_graph)
+
+    automorphisms = None
+    seen_orbits = set()
+    for extra in range(len(others) + 1):
+        fan_in = len(sinks) + extra
+        if fan_in < min_fan_in:
+            continue
+        if fan_in > max_fan_in:
+            break
+        for subset in itertools.combinations(others, extra):
+            if extra > 0:
+                if automorphisms is None:
+                    automorphisms = list(DiGraphMatcher(networkx_graph, networkx_graph).isomorphisms_iter())
+                if len(automorphisms) > 1:
+                    orbit_key = min(tuple(sorted(a[v] for v in subset)) for a in automorphisms)
+                    if orbit_key in seen_orbits:
+                        continue
+                    seen_orbits.add(orbit_key)
+            extended = networkx_graph.copy()
+            extended.add_node(output)
+            extended.add_edges_from((v, output) for v in sinks)
+            extended.add_edges_from((v, output) for v in subset)
+            yield extended
 
 
 # ── Gate Assignments ────────────────────────────────────────────────────────────────
@@ -709,6 +763,9 @@ def _generate_for_dag_size(
     status_interval=10.0,
     not_gates="none",
     circuit_filters=None,
+    output_connections="sinks",
+    max_edges=None,
+    max_extra_edges=None,
 ):
     """
     Generate combinatorial circuits and save them to a db.
@@ -760,6 +817,20 @@ def _generate_for_dag_size(
                       the NOTs. ``None`` (the default) means `DEFAULT_ALL_GATE_ASSIGNMENT_FILTERS`
                       when `gate_assignment` is ``'all'``, and no filters otherwise (an
                       ``'and-only'`` circuit, for example, is a structure, not a finished circuit).
+    :param output_connections: How the output gate is added to each nauty DAG. ``'sinks'`` (the
+                      default) connects it to exactly the DAG's sinks (`_add_single_sink`), so
+                      the output never reads a signal that also feeds another gate. ``'any'``
+                      also yields every connection to the sinks plus a subset of the other nodes
+                      (`_single_sink_extensions`), which covers every single-output circuit.
+    :param max_edges: If given, leave out circuits with more than this many edges, not counting
+                      NOT gates (the edges between inputs and gates, including the output gate's
+                      inputs). ``None`` (the default) means no limit.
+    :param max_extra_edges: If given, leave out circuits with more than this many edges beyond two
+                      per gate (see `graph_filters.num_extra_edges`): 0 allows only 2-input
+                      gates, 1 allows one 3-input gate, and so on. ``None`` means no limit.
+                      Both limits are checked on each circuit's structure before gates are
+                      assigned, and nauty is told the most edges a DAG can have and still pass,
+                      so circuits over a limit cost almost nothing.
     :returns: ``(n, user_quit)``: the number of circuits generated, and whether the user pressed ``q`` in the interactive display to stop early.
     """
     if not quiet:
@@ -769,29 +840,67 @@ def _generate_for_dag_size(
             f"min_num_outputs={min_num_outputs}, max_num_outputs={max_num_outputs}, "
             f"gate_assignment={gate_assignment}, display_circuits={display_circuits}, output_dir={output_dir}, "
             f"nauty_dir={nauty_dir}, quiet={quiet}, status_interval={status_interval}, "
-            f"not_gates={not_gates}, circuit_filters={circuit_filters}"
+            f"not_gates={not_gates}, circuit_filters={circuit_filters}, "
+            f"output_connections={output_connections}, max_edges={max_edges}, "
+            f"max_extra_edges={max_extra_edges}"
         )
 
     if not_gates not in ("none", "random", "all"):
         raise ValueError(
             f"Invalid not_gates: {not_gates!r} (expected 'none', 'random', or 'all')"
         )
+    if output_connections not in ("sinks", "any"):
+        raise ValueError(
+            f"Invalid output_connections: {output_connections!r} (expected 'sinks' or 'any')"
+        )
     # Building a networkx DiGraph is the most expensive step per DAG, and most DAGs are rejected
     # for having a gate with out-of-range fan-in. So check fan-in on nauty's raw text first, and
     # only build DiGraphs for the DAGs that pass.
     nauty_fan_in_filter = CountingFilter(
         "nauty_fan_in",
-        lambda line: nauty_in_degrees_in_range(line, min_num_inputs, max_num_inputs),
+        lambda line: nauty_in_degrees_in_range(line, min_num_inputs, max_num_inputs, output_connections),
     )
-    fan_in_ok_nauty_dags_iter = filter(
-        nauty_fan_in_filter, generate_nauty_digraphs(dag_size, nauty_dir=nauty_dir)
+    nauty_filters = [nauty_fan_in_filter]
+
+    # Edge limits. The output gate adds at least max(min_num_inputs, 1) edges and one gate, and
+    # a DAG has at least min_num_source sources, i.e. at most dag_size + 1 - min_num_source gates
+    # once the output is added -- so no DAG with more edges than this can pass. Telling geng
+    # keeps nauty from writing them at all; nauty_edges_within_limits and edges_within_limits
+    # below make the exact checks.
+    has_edge_limit = max_edges is not None or max_extra_edges is not None
+    nauty_max_edges = None
+    if has_edge_limit:
+        fewest_output_edges = max(min_num_inputs, 1)
+        bounds = []
+        if max_edges is not None:
+            bounds.append(max_edges - fewest_output_edges)
+        if max_extra_edges is not None:
+            most_gates = dag_size + 1 - min_num_source
+            bounds.append(2 * most_gates + max_extra_edges - fewest_output_edges)
+        nauty_max_edges = min(bounds)
+        nauty_filters.append(CountingFilter(
+            "nauty_edges",
+            lambda line: nauty_edges_within_limits(line, max_edges, max_extra_edges, min_num_inputs),
+        ))
+
+    fan_in_ok_nauty_dags_iter = generate_nauty_digraphs(
+        dag_size, nauty_dir=nauty_dir, max_edges=nauty_max_edges
     )
+    for f in nauty_filters:
+        fan_in_ok_nauty_dags_iter = filter(f, fan_in_ok_nauty_dags_iter)
     initial_networkx_dags_iter = map(nauty_to_networkx, fan_in_ok_nauty_dags_iter)
 
-    # If the initial dag has only one sink, then this operation creates a graph
-    # where the new sink has only input.  This graph is then filtered out by
-    # the non_sink_out_degrees_in_range
-    networkx_dags_iter = map(_add_single_sink, initial_networkx_dags_iter)
+    if output_connections == "sinks":
+        # If the initial dag has only one sink, then this operation creates a graph
+        # where the new sink has only input.  This graph is then filtered out by
+        # the non_sink_out_degrees_in_range
+        networkx_dags_iter = map(_add_single_sink, initial_networkx_dags_iter)
+    else:
+        # One graph per way of connecting the output (sinks plus a subset of the other nodes).
+        networkx_dags_iter = itertools.chain.from_iterable(
+            _single_sink_extensions(g, min_num_inputs, max_num_inputs)
+            for g in initial_networkx_dags_iter
+        )
 
     filters = [
         # Require a range of input counts for the resulting circuits.
@@ -811,6 +920,13 @@ def _generate_for_dag_size(
             lambda g: non_sink_out_degrees_in_range(g, min_num_outputs, max_num_outputs),
         ),
     ]
+    if has_edge_limit:
+        # Before any gates are assigned: a graph over a limit costs one check, not every
+        # gate assignment and NOT pattern.
+        filters.append(CountingFilter(
+            "edges",
+            lambda g: edges_within_limits(g, max_edges, max_extra_edges),
+        ))
 
     filtered_dags_iter = networkx_dags_iter
     for f in filters:
@@ -826,7 +942,7 @@ def _generate_for_dag_size(
     after_not_filters = [
         CountingFilter(f.__name__, f) for f in circuit_filters if f not in GATE_ONLY_FILTERS
     ]
-    all_counting_filters = [nauty_fan_in_filter] + filters + before_not_filters + after_not_filters
+    all_counting_filters = nauty_filters + filters + before_not_filters + after_not_filters
 
     n = 0
     dag_count = 0

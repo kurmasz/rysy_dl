@@ -5,13 +5,17 @@ import os
 import sys
 
 import networkx as nx
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from rysy_dl import graph_filters
 from rysy_dl.circuit_generator import _add_single_sink, nauty_to_networkx
 from rysy_dl.graph_filters import (
+    edges_within_limits,
     has_shared_internal_node,
+    nauty_edges_within_limits,
+    num_extra_edges,
     max_shared_subcircuit_depth,
     nauty_in_degrees_in_range,
     non_sink_out_degrees_in_range,
@@ -565,3 +569,121 @@ def test_nauty_in_degrees_in_range_matches_networkx_filter_exhaustively():
         for min_num, max_num in ranges:
             expected = non_source_in_degrees_in_range(graph, min_num, max_num)
             assert nauty_in_degrees_in_range(line, min_num, max_num) is expected, (line, min_num, max_num)
+
+
+# ── nauty_in_degrees_in_range with output_connections='any' ──────────────────────────────────────────
+# With 'any', the added output reads every sink plus any subset of the other nodes, so its fan-in
+# can be anything from (number of sinks) to (number of nodes).
+
+
+def test_nauty_in_degrees_in_range_any_accepts_single_sink_dag():
+    # 0 -> 2, 1 -> 2: one sink, so with 'sinks' the output's fan-in is 1 (too low for min 2),
+    # but with 'any' it can also read 0 and/or 1: fan-in 2 or 3.
+    assert nauty_in_degrees_in_range("3 2 0 2 1 2", 2, 6) is False
+    assert nauty_in_degrees_in_range("3 2 0 2 1 2", 2, 6, "any") is True
+
+
+def test_nauty_in_degrees_in_range_any_still_checks_internal_gates():
+    # 0 -> 1 gives node 1 fan-in 1, below min 2, whatever the output reads.
+    assert nauty_in_degrees_in_range("3 1 0 1", 2, 6, "any") is False
+
+
+def test_nauty_in_degrees_in_range_any_rejects_too_many_sinks():
+    # Four isolated nodes are four sinks; the output must read all four, above max 3.
+    assert nauty_in_degrees_in_range("4 0", 2, 3, "any") is False
+
+
+def test_nauty_in_degrees_in_range_any_rejects_too_few_nodes():
+    # One node: the output can read at most one signal, below min 2.
+    assert nauty_in_degrees_in_range("1 0", 2, 6, "any") is False
+
+
+def test_nauty_in_degrees_in_range_invalid_output_connections_raises():
+    with pytest.raises(ValueError, match="output_connections"):
+        nauty_in_degrees_in_range("2 0", 2, 6, "some")
+
+
+# ── edge limits ───────────────────────────────────────────────────────────────
+
+
+def _two_level_circuit(third_input=False):
+    """a, b -> G1; G1, c -> G2 (the output): 4 edges, 2 gates. With `third_input`, G2 also
+    reads a: 5 edges, one of them extra."""
+    g = nx.DiGraph([("a", "G1"), ("b", "G1"), ("G1", "G2"), ("c", "G2")])
+    if third_input:
+        g.add_edge("a", "G2")
+    return g
+
+
+def test_num_extra_edges_counts_edges_beyond_two_per_gate():
+    assert num_extra_edges(4, 2) == 0
+    assert num_extra_edges(5, 2) == 1
+    assert num_extra_edges(12, 5) == 2
+
+
+def test_edges_within_limits_without_limits_accepts_anything():
+    assert edges_within_limits(_two_level_circuit(third_input=True)) is True
+
+
+def test_edges_within_limits_max_edges_boundary():
+    g = _two_level_circuit(third_input=True)
+    assert edges_within_limits(g, max_edges=5) is True
+    assert edges_within_limits(g, max_edges=4) is False
+
+
+def test_edges_within_limits_max_extra_edges_boundary():
+    assert edges_within_limits(_two_level_circuit(), max_extra_edges=0) is True
+    assert edges_within_limits(_two_level_circuit(third_input=True), max_extra_edges=0) is False
+    assert edges_within_limits(_two_level_circuit(third_input=True), max_extra_edges=1) is True
+
+
+def test_edges_within_limits_both_limits_must_hold():
+    g = _two_level_circuit(third_input=True)
+    assert edges_within_limits(g, max_edges=10, max_extra_edges=0) is False
+    assert edges_within_limits(g, max_edges=4, max_extra_edges=5) is False
+    assert edges_within_limits(g, max_edges=5, max_extra_edges=1) is True
+
+
+def test_nauty_edges_within_limits_without_limits_accepts_anything():
+    assert nauty_edges_within_limits("3 2 0 2 1 2") is True
+
+
+def test_nauty_edges_within_limits_counts_the_output_gate():
+    # a, b -> G1 (2 edges). The output reads the one sink G1, but must read at least 2 nodes,
+    # so the circuit has at least 4 edges and 2 gates.
+    line = "3 2 0 2 1 2"
+    assert nauty_edges_within_limits(line, max_edges=4, min_output_fan_in=2) is True
+    assert nauty_edges_within_limits(line, max_edges=3, min_output_fan_in=2) is False
+    assert nauty_edges_within_limits(line, max_edges=3, min_output_fan_in=1) is True
+    assert nauty_edges_within_limits(line, max_extra_edges=0, min_output_fan_in=2) is True
+    # Three sinks (two isolated sources and G1) give the output at least 3 inputs.
+    assert nauty_edges_within_limits("5 2 0 2 1 2", max_extra_edges=0, min_output_fan_in=2) is False
+
+
+def _real_nauty_available():
+    from rysy_dl.circuit_generator import find_nauty
+    try:
+        find_nauty()
+        return True
+    except (NotADirectoryError, FileNotFoundError, PermissionError):
+        return False
+
+
+@pytest.mark.skipif(not _real_nauty_available(),
+                    reason="real geng/directg binaries not found (set $NAUTY, or put them on PATH)")
+@pytest.mark.parametrize("dag_size", [3, 4, 5, 6])
+def test_nauty_edges_within_limits_never_rejects_a_dag_that_has_a_passing_circuit(dag_size):
+    """The nauty-text check is a cheap pre-filter: it may keep a DAG none of whose circuits
+    pass, but must never drop one that has a passing circuit. With 'sinks' (exactly one
+    circuit per DAG) it must agree exactly."""
+    from rysy_dl.circuit_generator import generate_nauty_digraphs, _single_sink_extensions
+    limits = [dict(max_edges=e) for e in range(2, 12)] + [dict(max_extra_edges=x) for x in range(0, 5)] \
+        + [dict(max_edges=8, max_extra_edges=1)]
+    for line in generate_nauty_digraphs(dag_size):
+        base = nauty_to_networkx(line)
+        for limit in limits:
+            quick = nauty_edges_within_limits(line, min_output_fan_in=2, **limit)
+            if any(edges_within_limits(g, **limit) for g in _single_sink_extensions(base, 2, 6)):
+                assert quick, (line, limit)
+            assert quick == edges_within_limits(_add_single_sink(nauty_to_networkx(line)), **limit) \
+                or sum(1 for v in base if base.out_degree(v) == 0) < 2, (line, limit)

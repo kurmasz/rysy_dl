@@ -13,7 +13,8 @@ import pickle
 import sys
 from . import circuit_database
 from . import circuit_generator_display
-from .circuit_generator import generate_circuits_in_ranges, plan_dag_sizes
+from .circuit_generator import DEFAULT_ALL_GATE_ASSIGNMENT_FILTERS, generate_circuits_in_ranges, plan_dag_sizes
+from .circuit_filters import no_redundant_gate_inputs
 from .circuit_analyzer import circuit_to_expression
 from .circuit_layout import layout_circuit
 from .logging_config import PROGRESS
@@ -53,12 +54,16 @@ GENERATE_CIRCUITS_DEFAULTS = {
     'num_inputs': (2, 4),
     'num_gates': (2, 4),
     'max_nodes': None,
+    'max_edges': None,
+    'max_extra_edges': None,
     'min_fan_in': 2,
     'max_fan_in': 6,
     'min_fan_out': 1,
     'max_fan_out': 5,
     'gate_assignment': 'random',
     'not_gates': 'none',
+    'output_connections': 'sinks',
+    'reject_redundant_inputs': False,
     'show_graphs': False,
     'output_dir': 'temp_out',
     'nauty_dir': None,
@@ -70,18 +75,23 @@ GENERATE_CIRCUITS_DEFAULTS = {
 GENERATE_CIRCUITS_CHOICES = {
     'gate_assignment': ['random', 'all', 'and-only'],
     'not_gates': ['none', 'random', 'all'],
+    'output_connections': ['sinks', 'any'],
 }
 
 GENERATE_CIRCUITS_TYPES = {
     'num_inputs': _int_range,
     'num_gates': _int_range,
     'max_nodes': int,
+    'max_edges': int,
+    'max_extra_edges': int,
     'min_fan_in': int,
     'max_fan_in': int,
     'min_fan_out': int,
     'max_fan_out': int,
     'gate_assignment': str,
     'not_gates': str,
+    'output_connections': str,
+    'reject_redundant_inputs': bool,
     'show_graphs': bool,
     'output_dir': str,
     'nauty_dir': str,
@@ -206,6 +216,17 @@ def cmd_generate_circuits(args):
         print(f"Error: 'max_nodes' must be at least 2, got {args.max_nodes!r}", file=sys.stderr)
         sys.exit(1)
 
+    if args.max_edges is not None and args.max_edges < 1:
+        print(f"Error: 'max_edges' must be at least 1, got {args.max_edges!r}", file=sys.stderr)
+        sys.exit(1)
+    if args.max_extra_edges is not None and args.max_extra_edges < 0:
+        print(f"Error: 'max_extra_edges' must be at least 0, got {args.max_extra_edges!r}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.reject_redundant_inputs and args.gate_assignment != 'all':
+        print("Error: 'reject_redundant_inputs' requires gate_assignment 'all'", file=sys.stderr)
+        sys.exit(1)
+
     # Check before creating or prompting about the database.
     if not plan_dag_sizes(args.num_inputs, args.num_gates, args.max_nodes):
         print(f"Error: no circuits have {args.num_inputs[0]}-{args.num_inputs[1]} inputs and "
@@ -217,12 +238,18 @@ def cmd_generate_circuits(args):
         num_sources=args.num_inputs,
         num_gates=args.num_gates,
         max_nodes=args.max_nodes,
+        max_edges=args.max_edges,
+        max_extra_edges=args.max_extra_edges,
         min_num_inputs=args.min_fan_in,
         max_num_inputs=args.max_fan_in,
         min_num_outputs=args.min_fan_out,
         max_num_outputs=args.max_fan_out,
         gate_assignment=args.gate_assignment,
         not_gates=args.not_gates,
+        output_connections=args.output_connections,
+        # None lets generate_circuits choose its defaults for the gate assignment.
+        circuit_filters=(DEFAULT_ALL_GATE_ASSIGNMENT_FILTERS + (no_redundant_gate_inputs,)
+                         if args.reject_redundant_inputs else None),
         display_circuits=args.show_graphs,
         output_dir=args.output_dir,
         nauty_dir=args.nauty_dir,
@@ -388,6 +415,17 @@ def main():
     gc_parser.add_argument('--max-nodes', type=int, default=None,
                            help='Leave out circuits with more than this many inputs + gates. The circuit size, '
                                 'not the number of inputs, is what makes enumeration expensive (default: no limit)')
+    gc_parser.add_argument('--max-edges', type=int, default=None,
+                           help='Leave out circuits with more than this many edges (wires between inputs and '
+                                'gates, including the output gate\'s inputs; NOT gates are not counted). '
+                                'Checked before gates are assigned, so it also makes generation faster '
+                                '(default: no limit)')
+    gc_parser.add_argument('--max-extra-edges', type=int, default=None,
+                           help='Leave out circuits with more than this many edges beyond two per gate: 0 '
+                                'allows only 2-input gates, 1 allows one 3-input gate, and so on. Unlike '
+                                '--max-edges, the same value suits circuits of every size. Few circuits with '
+                                'many extra edges pass the filters, and they take most of the generation time '
+                                '(default: no limit)')
     gc_parser.add_argument('--min-fan-in', type=int, default=None, help='Minimum number of inputs for each gate (default: 2)')
     gc_parser.add_argument('--max-fan-in', type=int, default=None, help='Maximum number of inputs for each gate (default: 6)')
     gc_parser.add_argument('--min-fan-out', type=int, default=None, help='Minimum number of outputs for each gate (default: 1)')
@@ -397,6 +435,16 @@ def main():
                             help='NOT gates on edges leaving the inputs: none, random (randomly insert them), '
                                  'or all (every reduced NOT pattern for each gate assignment; patterns that only '
                                  'swap an input for its complement are skipped) (default: none)')
+    gc_parser.add_argument('--output-connections', type=str, default=None, choices=['sinks', 'any'],
+                            help='How the output gate is connected: sinks (only to the nodes that feed nothing '
+                                 'else, so the output never reads a signal that also feeds another gate) or any '
+                                 '(those plus every subset of the other nodes, covering every single-output '
+                                 'circuit; many more circuits) (default: sinks)')
+    gc_parser.add_argument('--reject-redundant-inputs', action=argparse.BooleanOptionalAction, default=None,
+                            help='Also reject circuits where some gate input can be removed without changing '
+                                 'the output (circuit_filters.no_redundant_gate_inputs). Stricter than the '
+                                 'default filters; meant for use with --output-connections any. Requires '
+                                 '--gate-assignment all (default: False)')
     gc_parser.add_argument('--show-graphs', action=argparse.BooleanOptionalAction, default=None, help='Show generated graphs (default: False)')
     gc_parser.add_argument('--generate-image', action=argparse.BooleanOptionalAction, default=None, help='Write a PNG image for each generated circuit (default: True)')
     gc_parser.add_argument('--output-dir', type=str, default=None, help='Directory to save generated graphs and expressions (default: temp_out)')

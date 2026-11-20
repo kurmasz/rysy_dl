@@ -48,7 +48,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import rysy_dl  # noqa: E402 --- needed to patch rysy_dl.circuit_generator_display directly (see below)
 from rysy_dl.circuit_generator import (  # noqa: E402 --- tell linter to ignore import position
     verify_nauty, find_nauty, generate_nauty_digraphs, nauty_to_networkx,
-    _add_single_sink, assign_all_gates_and, assign_gates_randomly_ensure_diversity,
+    _add_single_sink, _single_sink_extensions, assign_all_gates_and, assign_gates_randomly_ensure_diversity,
     assign_gates_randomly, all_gate_assignments_without_collapsable_children, generate_circuits,
     _not_node_inserter, insert_random_source_edge_nots, CountingFilter,
 )
@@ -638,6 +638,108 @@ def test_mutates_and_returns_the_same_graph_object():
     G.add_edge(0, 1)
     result = _add_single_sink(G)
     assert result is G
+
+
+# ── test _single_sink_extensions ──────────────────────────────────────
+
+def _output_inputs(graph):
+    """The predecessors of the single sink (the added output) of `graph`."""
+    (output,) = [v for v in graph if graph.out_degree(v) == 0]
+    return sorted(graph.predecessors(output))
+
+
+def test_single_sink_extensions_first_graph_matches_add_single_sink():
+    """With no extra nodes allowed below min fan-in, the first graph is _add_single_sink's."""
+    G = nx.DiGraph()
+    G.add_nodes_from(range(3))  # three isolated nodes: three sinks
+    results = list(_single_sink_extensions(G, 2, 6))
+    expected = _add_single_sink(G.copy())
+    assert len(results) == 1
+    assert sorted(results[0].edges()) == sorted(expected.edges())
+
+
+def test_single_sink_extensions_two_inputs_two_gates():
+    """a, b -> G1 (one sink). The output must read G1 plus a, or plus a and b. Reading only G1
+    is fan-in 1 (too low); G1 + b is a mirror image of G1 + a and is left out."""
+    G = nx.DiGraph([(0, 2), (1, 2)])
+    results = list(_single_sink_extensions(G, 2, 6))
+    assert [_output_inputs(r) for r in results] == [[0, 2], [0, 1, 2]]
+
+
+def test_single_sink_extensions_respects_max_fan_in():
+    G = nx.DiGraph([(0, 2), (1, 2)])
+    results = list(_single_sink_extensions(G, 2, 2))
+    assert [_output_inputs(r) for r in results] == [[0, 2]]
+
+
+def test_single_sink_extensions_output_can_read_a_shared_gate():
+    """a, b -> G1; G1, c -> G2 (the only sink). The output can read G2 and G1, which builds
+    out = f(G2(G1(a, b), c), G1(a, b)) -- a gate (not just an input) feeding both."""
+    G = nx.DiGraph([(0, 3), (1, 3), (3, 4), (2, 4)])
+    inputs = [_output_inputs(r) for r in _single_sink_extensions(G, 2, 2)]
+    assert [3, 4] in inputs
+
+
+def test_single_sink_extensions_asymmetric_dag_keeps_every_subset():
+    """a -> G1 <- b, a -> G2 <- G1: no non-trivial automorphism (a and b play different roles),
+    so every allowed subset of the non-sinks gives a different circuit."""
+    G = nx.DiGraph([(0, 2), (1, 2), (0, 3), (2, 3)])
+    inputs = [_output_inputs(r) for r in _single_sink_extensions(G, 2, 6)]
+    # Sink 3 plus one, two, or three of {0, 1, 2}: 3 + 3 + 1 = 7 graphs, all distinct.
+    assert len(inputs) == 7
+    assert len({tuple(i) for i in inputs}) == 7
+
+
+def test_single_sink_extensions_does_not_modify_input():
+    G = nx.DiGraph([(0, 2), (1, 2)])
+    before = sorted(G.edges())
+    list(_single_sink_extensions(G, 2, 6))
+    assert sorted(G.edges()) == before
+    assert len(G) == 3
+
+
+def _single_output_dag_counts_brute_force(num_nodes, min_fan_in, max_fan_in):
+    """Count, per (sources, non-sources), the DAGs on `num_nodes` nodes, up to isomorphism, that
+    have exactly one sink and whose non-source nodes all have fan-in in range. nauty yields each
+    DAG once, so this is an independent reference for _single_sink_extensions."""
+    from collections import Counter
+    counts = Counter()
+    for line in generate_nauty_digraphs(num_nodes):
+        g = nauty_to_networkx(line)
+        if sum(1 for v in g if g.out_degree(v) == 0) != 1:
+            continue
+        if any(g.in_degree(v) and not min_fan_in <= g.in_degree(v) <= max_fan_in for v in g):
+            continue
+        sources = sum(1 for v in g if g.in_degree(v) == 0)
+        counts[(sources, num_nodes - sources)] += 1
+    return counts
+
+
+def _single_output_dag_counts_by_extension(num_nodes, min_fan_in, max_fan_in):
+    from collections import Counter
+    counts = Counter()
+    for line in generate_nauty_digraphs(num_nodes - 1):
+        base = nauty_to_networkx(line)
+        if any(base.in_degree(v) and not min_fan_in <= base.in_degree(v) <= max_fan_in for v in base):
+            continue
+        for g in _single_sink_extensions(base, min_fan_in, max_fan_in):
+            sources = sum(1 for v in g if g.in_degree(v) == 0)
+            counts[(sources, num_nodes - sources)] += 1
+    return counts
+
+
+@pytest.mark.skipif(
+    not _real_nauty_available(),
+    reason="real geng/directg binaries not found (set $NAUTY, or put them on PATH)",
+)
+@pytest.mark.parametrize("num_nodes", [3, 4, 5, 6, 7])
+@pytest.mark.parametrize("fan_in", [(2, 6), (1, 2)])
+def test_single_sink_extensions_matches_brute_force(num_nodes, fan_in):
+    """Building every single-output DAG from the (n-1)-node DAGs gives exactly the same counts,
+    per number of inputs and gates, as filtering every n-node DAG down to those with one sink.
+    Any missed or duplicated circuit shape would change a count."""
+    expected = _single_output_dag_counts_brute_force(num_nodes, *fan_in)
+    assert _single_output_dag_counts_by_extension(num_nodes, *fan_in) == expected
 
 
 # ── test assign_all_gates_and ─────────────────────────────────────────────
@@ -1705,13 +1807,28 @@ def _run_generate_circuits(dag_lines, db, **overrides):
     )
     kwargs.update(overrides)
     with patch('rysy_dl.circuit_generator.generate_nauty_digraphs',
-               lambda dag_size, nauty_dir=None: iter(dag_lines)):
+               lambda dag_size, nauty_dir=None, max_edges=None: iter(dag_lines)):
         return generate_circuits(db=db, **kwargs)
 
 
 def test_generate_circuits_invalid_gate_assignment_raises():
     with pytest.raises(ValueError, match="Invalid gate_assignment"):
         _run_generate_circuits(["1 0"], db=None, gate_assignment='bogus')
+
+
+def test_generate_circuits_invalid_output_connections_raises():
+    with pytest.raises(ValueError, match="output_connections"):
+        _run_generate_circuits(["2 0"], _RecordingDB(), output_connections='some')
+
+
+def test_generate_circuits_output_connections_any_adds_shared_output_inputs():
+    """'3 2 0 2 1 2' is a, b -> G1. With the default 'sinks' the output reads only G1 (fan-in 1,
+    rejected for min fan-in 2); with 'any' it can also read a, or a and b."""
+    sinks_db, any_db = _RecordingDB(), _RecordingDB()
+    _run_generate_circuits(["3 2 0 2 1 2"], sinks_db, min_num_inputs=2)
+    _run_generate_circuits(["3 2 0 2 1 2"], any_db, min_num_inputs=2, output_connections='any')
+    assert sinks_db.added == []
+    assert len(any_db.added) == 2
 
 
 def test_generate_circuits_invalid_not_gates_raises():
@@ -2091,7 +2208,7 @@ def _run_in_ranges(lines_by_size, db, **overrides):
     lines_by_size.get(d, []). Returns (result, list of DAG sizes nauty was asked for)."""
     requested = []
 
-    def fake_nauty(dag_size, nauty_dir=None):
+    def fake_nauty(dag_size, nauty_dir=None, max_edges=None):
         requested.append(dag_size)
         return iter(lines_by_size.get(dag_size, []))
 
@@ -2369,3 +2486,75 @@ def test_generate_circuits_saved_count_excludes_rejected_circuits():
 
     assert result == 0
     assert db.added == []
+
+
+# ── edge limits ───────────────────────────────────────────────────────────────
+
+from rysy_dl.graph_filters import edges_within_limits  # noqa: E402
+
+
+def test_generate_nauty_digraphs_passes_max_edges_to_geng():
+    found = {'geng': '/n/geng', 'directg': '/n/directg'}
+    with patch('rysy_dl.circuit_generator.find_nauty', return_value=found), \
+         patch('rysy_dl.circuit_generator.subprocess.Popen', return_value=_mock_popen_proc()) as mock_popen:
+        generate_nauty_digraphs(5, max_edges=7)
+
+    assert mock_popen.call_args.args[0][-1] == "/n/geng 5 0:7 | /n/directg -aTq"
+
+
+@pytest.mark.skipif(
+    not _real_nauty_available(),
+    reason="real geng/directg binaries not found (set $NAUTY, or put them on PATH)",
+)
+def test_generate_nauty_digraphs_max_edges_keeps_exactly_the_smaller_dags():
+    every = list(generate_nauty_digraphs(5))
+    limited = list(generate_nauty_digraphs(5, max_edges=4))
+    assert sorted(limited) == sorted(line for line in every if int(line.split()[1]) <= 4)
+
+
+def test_generate_circuits_edge_limits_tell_nauty_the_largest_useful_dag():
+    requested = {}
+
+    def fake_nauty(dag_size, nauty_dir=None, max_edges=None):
+        requested['max_edges'] = max_edges
+        return iter([])
+
+    def run(**limits):
+        with patch('rysy_dl.circuit_generator.generate_nauty_digraphs', fake_nauty):
+            generate_circuits(db=None, dag_size=6, min_num_source=3, max_num_source=4,
+                              min_num_inputs=2, max_num_inputs=6, min_num_outputs=1, max_num_outputs=5,
+                              gate_assignment='and-only', display_circuits=False, output_dir=None,
+                              quiet=True, **limits)
+        return requested['max_edges']
+
+    assert run() is None
+    # the output gate adds at least 2 edges
+    assert run(max_edges=12) == 10
+    # at most 7 - 3 = 4 gates: at most 8 + 1 edges, 2 of them the output's
+    assert run(max_extra_edges=1) == 7
+    assert run(max_edges=8, max_extra_edges=1) == 6
+
+
+@pytest.mark.skipif(
+    not _real_nauty_available(),
+    reason="real geng/directg binaries not found (set $NAUTY, or put them on PATH)",
+)
+@pytest.mark.parametrize("output_connections", ["sinks", "any"])
+@pytest.mark.parametrize("limits", [dict(max_edges=7), dict(max_extra_edges=0), dict(max_extra_edges=1),
+                                    dict(max_edges=8, max_extra_edges=1)])
+def test_generate_circuits_edge_limits_match_filtering_the_unlimited_output(output_connections, limits):
+    """Limiting edges (including the nauty pre-checks) must keep exactly the circuits that an
+    unlimited run produces with at most that many edges -- no more, no fewer."""
+    def run(**extra):
+        db = _RecordingDB()
+        generate_circuits(db=db, dag_size=5, min_num_source=2, max_num_source=4,
+                          min_num_inputs=2, max_num_inputs=6, min_num_outputs=1, max_num_outputs=5,
+                          gate_assignment='and-only', display_circuits=False, output_dir=None,
+                          quiet=True, output_connections=output_connections, **extra)
+        return db.added
+
+    unlimited = run()
+    limited = run(**limits)
+    expected = [g for g in unlimited if edges_within_limits(g, **limits)]
+    assert 0 < len(limited) < len(unlimited)
+    assert sorted(sorted(g.edges()) for g in limited) == sorted(sorted(g.edges()) for g in expected)

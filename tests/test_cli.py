@@ -556,6 +556,81 @@ def test_cmd_generate_circuits_passes_not_gates_through(tmp_path, monkeypatch):
     assert calls['not_gates'] == 'random'
 
 
+def test_generate_circuits_parses_output_connections_option(monkeypatch):
+    received = []
+    monkeypatch.setattr(cli, 'cmd_generate_circuits', received.append)
+    monkeypatch.setattr(sys, 'argv', ['rysy_dl', 'generate-circuits', 'foo.db', '--output-connections', 'any'])
+
+    cli.main()
+
+    assert received[0].output_connections == 'any'
+
+
+def test_cmd_generate_circuits_passes_output_connections_through(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.circuit_database, 'create', lambda p: None)
+    monkeypatch.setattr(cli.circuit_database, 'CircuitDatabase', lambda p: FakeDB())
+    calls = {}
+    monkeypatch.setattr(cli, 'generate_circuits_in_ranges', lambda **kw: calls.update(kw))
+
+    cli.cmd_generate_circuits(make_args(db_name=str(tmp_path / "c.db"), output_connections='any'))
+
+    assert calls['output_connections'] == 'any'
+
+
+def test_cmd_generate_circuits_output_connections_defaults_to_sinks(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.circuit_database, 'create', lambda p: None)
+    monkeypatch.setattr(cli.circuit_database, 'CircuitDatabase', lambda p: FakeDB())
+    calls = {}
+    monkeypatch.setattr(cli, 'generate_circuits_in_ranges', lambda **kw: calls.update(kw))
+
+    cli.cmd_generate_circuits(make_args(db_name=str(tmp_path / "c.db")))
+
+    assert calls['output_connections'] == 'sinks'
+
+
+def test_cmd_generate_circuits_rejects_invalid_output_connections_from_config(tmp_path, capsys):
+    config = tmp_path / "gen.cfg"
+    config.write_text("output_connections: some\n")
+
+    with pytest.raises(SystemExit):
+        cli.cmd_generate_circuits(make_args(db_name=str(tmp_path / "c.db"), config=str(config)))
+
+    assert "'output_connections' must be one of" in capsys.readouterr().err
+
+
+def test_cmd_generate_circuits_reject_redundant_inputs_adds_filter(tmp_path, monkeypatch):
+    from rysy_dl.circuit_generator import DEFAULT_ALL_GATE_ASSIGNMENT_FILTERS
+    from rysy_dl.circuit_filters import no_redundant_gate_inputs
+    monkeypatch.setattr(cli.circuit_database, 'create', lambda p: None)
+    monkeypatch.setattr(cli.circuit_database, 'CircuitDatabase', lambda p: FakeDB())
+    calls = {}
+    monkeypatch.setattr(cli, 'generate_circuits_in_ranges', lambda **kw: calls.update(kw))
+
+    cli.cmd_generate_circuits(make_args(db_name=str(tmp_path / "c.db"), gate_assignment='all',
+                                        reject_redundant_inputs=True))
+
+    assert calls['circuit_filters'] == DEFAULT_ALL_GATE_ASSIGNMENT_FILTERS + (no_redundant_gate_inputs,)
+
+
+def test_cmd_generate_circuits_without_reject_redundant_inputs_uses_default_filters(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.circuit_database, 'create', lambda p: None)
+    monkeypatch.setattr(cli.circuit_database, 'CircuitDatabase', lambda p: FakeDB())
+    calls = {}
+    monkeypatch.setattr(cli, 'generate_circuits_in_ranges', lambda **kw: calls.update(kw))
+
+    cli.cmd_generate_circuits(make_args(db_name=str(tmp_path / "c.db"), gate_assignment='all'))
+
+    assert calls['circuit_filters'] is None
+
+
+def test_cmd_generate_circuits_reject_redundant_inputs_requires_all_gate_assignment(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        cli.cmd_generate_circuits(make_args(db_name=str(tmp_path / "c.db"), gate_assignment='and-only',
+                                            reject_redundant_inputs=True))
+
+    assert "requires gate_assignment 'all'" in capsys.readouterr().err
+
+
 def test_cmd_generate_circuits_rejects_invalid_not_gates_from_config(tmp_path, capsys):
     config = tmp_path / "gen.cfg"
     config.write_text("not_gates: sometimes\n")
@@ -668,3 +743,67 @@ def test_upgrade_db_missing_file_exits_after_trying_the_rest(tmp_path, monkeypat
     captured = capsys.readouterr()
     assert 'missing.sqlite' in captured.err
     assert 'ok.sqlite: already up to date' in captured.out
+
+
+# ── edge limits ───────────────────────────────────────────────────────────────
+
+
+def test_generate_circuits_parses_edge_limit_options(monkeypatch):
+    received = []
+    monkeypatch.setattr(cli, 'cmd_generate_circuits', received.append)
+    monkeypatch.setattr(sys, 'argv', ['rysy_dl', 'generate-circuits', 'foo.db',
+                                      '--max-edges', '12', '--max-extra-edges', '2'])
+
+    cli.main()
+
+    assert received[0].max_edges == 12
+    assert received[0].max_extra_edges == 2
+
+
+def test_cmd_generate_circuits_passes_edge_limits_through(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.circuit_database, 'create', lambda p: None)
+    monkeypatch.setattr(cli.circuit_database, 'CircuitDatabase', lambda p: FakeDB())
+    calls = {}
+    monkeypatch.setattr(cli, 'generate_circuits_in_ranges', lambda **kw: calls.update(kw))
+
+    cli.cmd_generate_circuits(make_args(db_name=str(tmp_path / "c.db"), max_edges=12, max_extra_edges=2))
+
+    assert calls['max_edges'] == 12
+    assert calls['max_extra_edges'] == 2
+
+
+def test_cmd_generate_circuits_edge_limits_default_to_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.circuit_database, 'create', lambda p: None)
+    monkeypatch.setattr(cli.circuit_database, 'CircuitDatabase', lambda p: FakeDB())
+    calls = {}
+    monkeypatch.setattr(cli, 'generate_circuits_in_ranges', lambda **kw: calls.update(kw))
+
+    cli.cmd_generate_circuits(make_args(db_name=str(tmp_path / "c.db")))
+
+    assert calls['max_edges'] is None
+    assert calls['max_extra_edges'] is None
+
+
+def test_cmd_generate_circuits_edge_limits_from_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.circuit_database, 'create', lambda p: None)
+    monkeypatch.setattr(cli.circuit_database, 'CircuitDatabase', lambda p: FakeDB())
+    calls = {}
+    monkeypatch.setattr(cli, 'generate_circuits_in_ranges', lambda **kw: calls.update(kw))
+    config = tmp_path / "gen.cfg"
+    config.write_text("max_edges: 13\nmax-extra-edges: 3\n")
+
+    cli.cmd_generate_circuits(make_args(db_name=str(tmp_path / "c.db"), config=str(config)))
+
+    assert calls['max_edges'] == 13
+    assert calls['max_extra_edges'] == 3
+
+
+@pytest.mark.parametrize("name, value, message", [
+    ('max_edges', 0, "'max_edges' must be at least 1"),
+    ('max_extra_edges', -1, "'max_extra_edges' must be at least 0"),
+])
+def test_cmd_generate_circuits_rejects_bad_edge_limits(tmp_path, capsys, name, value, message):
+    with pytest.raises(SystemExit):
+        cli.cmd_generate_circuits(make_args(db_name=str(tmp_path / "c.db"), **{name: value}))
+
+    assert message in capsys.readouterr().err

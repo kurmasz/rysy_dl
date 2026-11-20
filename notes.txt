@@ -16,3 +16,26 @@ $ ./geng 9 | ./directg -au
 >Z 274668 graphs generated in 0.10 sec
 >Z 274668 graphs read from stdin; 3424938010 digraphs generated; 344.09 sec
 
+
+
+concrete_circuits_n4-8: old vs. new (2026-11-20)
+================================================
+old = sinks-only output, default filters (32MB, ~430K circuits)
+new = --output-connections any --reject-redundant-inputs (4.4MB, 61K circuits; ~2.5 hours to build)
+
+circuits  = rows in the DB (structure + gate types + NOT placement)
+shapes    = wiring with gate types ignored and NOTs removed
+functions = output truth table, up to renaming the inputs
+
+inputs+gates   old: circuits / shapes / functions   new: circuits / shapes / functions
+2 + 2          none                                  12 /   1 /    4
+2 + 3             204 /   1 /    8                  126 /   4 /    8
+2 + 4           5,508 /   7 /    8                  686 /  16 /    8
+3 + 2              21 /   1 /   21                   33 /   3 /   21
+3 + 3             964 /   6 /   54                  648 /  20 /   54
+3 + 4          62,384 /  74 /   68               10,341 / 155 /   68
+4 + 2              32 /   2 /   30                   44 /   4 /   30
+4 + 3           2,698 /  18 /  269                1,668 /  39 /  279
+4 + 4         355,656 / 375 / 1348               47,676 / 496 / 1380
+
+68 is every 3-input function that uses all three inputs (8 for 2 inputs, 3904 for 4).
