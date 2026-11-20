@@ -26,7 +26,10 @@ Common workflow:
 :copyright: 2026, Zachary and Andrew Kurmas
 """
 
+import collections
+import multiprocessing
 import os
+import pickle
 import random
 import shlex
 import shutil
@@ -745,6 +748,148 @@ def _with_random_source_nots(netlist):
     return netlist
 
 
+class _CircuitMaker:
+    """
+    Turns one shape -- a DAG whose output gate has been added, with no gates assigned -- into
+    the finished circuits saved to the database: its gate assignments, NOT gates, and the
+    circuit filters. Nearly all of the time spent generating circuits is spent here.
+
+    Both the serial loop in `_generate_for_dag_size` and the worker processes it starts when
+    `workers` > 1 use this, so the two produce the same circuits in the same order. It is
+    pickled to send it to each worker, so `circuit_filters` must be module-level functions.
+    """
+
+    def __init__(self, gate_assignment, not_gates, circuit_filters):
+        if gate_assignment not in ("random", "all", "and-only"):
+            raise ValueError(
+                f"Invalid gate_assignment: {gate_assignment!r} (expected 'random', 'all', or 'and-only')"
+            )
+        self.gate_assignment = gate_assignment
+        self.not_gates = not_gates
+        # A NOT added on a source edge can't change a gate-only filter's answer, so those run
+        # first and spare the NOT patterns.
+        self.before_not_filters = [
+            CountingFilter(f.__name__, f) for f in circuit_filters if f in GATE_ONLY_FILTERS
+        ]
+        self.after_not_filters = [
+            CountingFilter(f.__name__, f) for f in circuit_filters if f not in GATE_ONLY_FILTERS
+        ]
+
+    @property
+    def counting_filters(self):
+        return self.before_not_filters + self.after_not_filters
+
+    def circuits(self, raw_digraph):
+        """Yield every finished circuit built from `raw_digraph`, one at a time."""
+        if self.gate_assignment == "random":
+            assign_gates_randomly(raw_digraph)
+            netlists = [raw_digraph]
+        elif self.gate_assignment == "all":
+            # A generator, so the gate assignments are made one at a time. It never produces
+            # collapsable children, so no_collapsable_children is not needed below.
+            netlists = all_gate_assignments_without_collapsable_children(raw_digraph)
+        else:
+            assign_all_gates_and(raw_digraph)
+            netlists = [raw_digraph]
+
+        for f in self.before_not_filters:
+            netlists = filter(f, netlists)
+
+        if self.not_gates == "all":
+            # Each gate assignment becomes one circuit per reduced NOT pattern.
+            netlists = (
+                with_nots
+                for netlist in netlists
+                for with_nots in all_reduced_source_nots(netlist)
+            )
+        elif self.not_gates == "random":
+            netlists = map(_with_random_source_nots, netlists)
+
+        for f in self.after_not_filters:
+            netlists = filter(f, netlists)
+
+        yield from netlists
+
+
+# Shapes sent to a worker at a time. Small enough that one slow shape doesn't hold up many others,
+# large enough that sending them costs little next to the work.
+_WORKER_BATCH_SIZE = 8
+# Batches waiting or running per worker. Results are collected in order, so while the oldest
+# batch is still running the others keep the workers busy; this bounds the shapes and circuits
+# held in memory.
+_PENDING_BATCHES_PER_WORKER = 8
+
+# Each worker process's copy of the parent's _CircuitMaker (set by _init_worker).
+_worker_circuit_maker = None
+
+
+def _init_worker(circuit_maker):
+    global _worker_circuit_maker
+    _worker_circuit_maker = circuit_maker
+    # Ctrl-C goes to the whole process group; let the parent handle it and stop the workers.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def _make_circuits_for_batch(shapes):
+    """Runs in a worker: the circuits for each shape, in order, and how many circuits each of
+    the worker's filters evaluated and rejected for this batch."""
+    maker = _worker_circuit_maker
+    for f in maker.counting_filters:
+        f.evaluated = f.rejected = 0
+    circuits = [circuit for shape in shapes for circuit in maker.circuits(shape)]
+    return circuits, [(f.evaluated, f.rejected) for f in maker.counting_filters]
+
+
+def resolve_workers(workers):
+    """The number of processes `workers` asks for: 0 (or None) means one per CPU."""
+    if not workers:
+        return os.cpu_count() or 1
+    if workers < 0:
+        raise ValueError(f"workers must be 0 (one per CPU) or more, got {workers!r}")
+    return workers
+
+
+def _parallel_circuits(shapes, circuit_maker, workers):
+    """
+    Yield the circuits for `shapes` (an iterator), built by `workers` processes, in the same
+    order the serial loop would produce them. The workers' filter counts are added to
+    `circuit_maker`'s filters, so its stats match a serial run.
+
+    `shapes` is read only as fast as the workers keep up (at most
+    `_PENDING_BATCHES_PER_WORKER` batches per worker are outstanding), so nauty's output is never
+    buffered in memory. Closing the returned generator stops the workers.
+    """
+    try:
+        pickle.dumps(circuit_maker)
+    except (pickle.PicklingError, AttributeError, TypeError) as e:
+        raise ValueError(
+            "with more than one worker, circuit_filters must be module-level functions "
+            f"(they are sent to each worker process): {e}"
+        ) from e
+
+    def collect(result):
+        circuits, counts = result.get()
+        for f, (evaluated, rejected) in zip(circuit_maker.counting_filters, counts):
+            f.evaluated += evaluated
+            f.rejected += rejected
+        return circuits
+
+    # "spawn" everywhere: fork would copy this process's open nauty pipeline into each worker.
+    context = multiprocessing.get_context("spawn")
+    with context.Pool(workers, initializer=_init_worker, initargs=(circuit_maker,)) as pool:
+        pending = collections.deque()
+        max_pending = workers * _PENDING_BATCHES_PER_WORKER
+        shapes = iter(shapes)
+        while True:
+            batch = list(itertools.islice(shapes, _WORKER_BATCH_SIZE))
+            if batch:
+                pending.append(pool.apply_async(_make_circuits_for_batch, (batch,)))
+            if not pending:
+                break
+            if not batch or len(pending) >= max_pending:
+                yield from collect(pending.popleft())
+
+
 def _generate_for_dag_size(
     dag_size,
     db,
@@ -766,6 +911,7 @@ def _generate_for_dag_size(
     output_connections="sinks",
     max_edges=None,
     max_extra_edges=None,
+    workers=1,
 ):
     """
     Generate combinatorial circuits and save them to a db.
@@ -831,6 +977,12 @@ def _generate_for_dag_size(
                       Both limits are checked on each circuit's structure before gates are
                       assigned, and nauty is told the most edges a DAG can have and still pass,
                       so circuits over a limit cost almost nothing.
+    :param workers: Number of processes that assign gates and NOTs and run the circuit filters:
+                      1 (the default) does everything in this process; 0 means one per CPU.
+                      nauty and the structural filters always run in this process, which also
+                      does all writing to `db`. The circuits, their order, and the filter stats
+                      are the same for any number of workers. With more than one, `circuit_filters`
+                      must be module-level functions and `display_circuits` must be False.
     :returns: ``(n, user_quit)``: the number of circuits generated, and whether the user pressed ``q`` in the interactive display to stop early.
     """
     if not quiet:
@@ -842,7 +994,7 @@ def _generate_for_dag_size(
             f"nauty_dir={nauty_dir}, quiet={quiet}, status_interval={status_interval}, "
             f"not_gates={not_gates}, circuit_filters={circuit_filters}, "
             f"output_connections={output_connections}, max_edges={max_edges}, "
-            f"max_extra_edges={max_extra_edges}"
+            f"max_extra_edges={max_extra_edges}, workers={workers}"
         )
 
     if not_gates not in ("none", "random", "all"):
@@ -853,6 +1005,14 @@ def _generate_for_dag_size(
         raise ValueError(
             f"Invalid output_connections: {output_connections!r} (expected 'sinks' or 'any')"
         )
+    workers = resolve_workers(workers)
+    if workers > 1 and display_circuits:
+        raise ValueError("display_circuits needs workers=1 (it waits for a keypress after each circuit)")
+    if circuit_filters is None:
+        circuit_filters = DEFAULT_ALL_GATE_ASSIGNMENT_FILTERS if gate_assignment == "all" else ()
+    # Checks gate_assignment before nauty starts. Its filters are created once, so their counts
+    # add up across all DAGs.
+    circuit_maker = _CircuitMaker(gate_assignment, not_gates, circuit_filters)
     # Building a networkx DiGraph is the most expensive step per DAG, and most DAGs are rejected
     # for having a gate with out-of-range fan-in. So check fan-in on nauty's raw text first, and
     # only build DiGraphs for the DAGs that pass.
@@ -932,58 +1092,20 @@ def _generate_for_dag_size(
     for f in filters:
         filtered_dags_iter = filter(f, filtered_dags_iter)
 
-    if circuit_filters is None:
-        circuit_filters = DEFAULT_ALL_GATE_ASSIGNMENT_FILTERS if gate_assignment == "all" else ()
-    # Wrapped once, so their counts add up across all DAGs. A NOT added on a source edge can't
-    # change a gate-only filter's answer, so those run first and spare the NOT patterns.
-    before_not_filters = [
-        CountingFilter(f.__name__, f) for f in circuit_filters if f in GATE_ONLY_FILTERS
-    ]
-    after_not_filters = [
-        CountingFilter(f.__name__, f) for f in circuit_filters if f not in GATE_ONLY_FILTERS
-    ]
-    all_counting_filters = nauty_filters + filters + before_not_filters + after_not_filters
+    all_counting_filters = nauty_filters + filters + circuit_maker.counting_filters
+
+    if workers == 1:
+        circuits_iter = (
+            circuit for shape in filtered_dags_iter for circuit in circuit_maker.circuits(shape)
+        )
+    else:
+        circuits_iter = _parallel_circuits(filtered_dags_iter, circuit_maker, workers)
 
     n = 0
-    dag_count = 0
     last_status_time = time.monotonic()
     last_status_n = 0
-    for raw_digraph in filtered_dags_iter:
-        dag_count += 1
-
-        if gate_assignment == "random":
-            assign_gates_randomly(raw_digraph)
-            netlists_from_digraph = [raw_digraph]
-        elif gate_assignment == "all":
-            # all_gate_assignments_without_collapsable_children returns a generator, not a list, so we don't need to store all of its results in memory at once. Instead, we can iterate over it directly below.
-            # It never produces collapsable children, so the no_collapsable_children filter is no longer needed below.
-            netlists_from_digraph = all_gate_assignments_without_collapsable_children(raw_digraph)
-        elif gate_assignment == "and-only":
-            assign_all_gates_and(raw_digraph)
-            netlists_from_digraph = [raw_digraph]
-        else:
-            raise ValueError(
-                f"Invalid gate_assignment: {gate_assignment!r} (expected 'random', 'all', or 'and-only')"
-            )
-
-        for f in before_not_filters:
-            netlists_from_digraph = filter(f, netlists_from_digraph)
-
-        if not_gates == "all":
-            # Each gate assignment becomes one circuit per reduced NOT pattern. Like
-            # netlists_from_digraph, this is a generator, so circuits are made one at a time.
-            netlists_from_digraph = (
-                with_nots
-                for netlist in netlists_from_digraph
-                for with_nots in all_reduced_source_nots(netlist)
-            )
-        elif not_gates == "random":
-            netlists_from_digraph = map(_with_random_source_nots, netlists_from_digraph)
-
-        for f in after_not_filters:
-            netlists_from_digraph = filter(f, netlists_from_digraph)
-
-        for netlist in netlists_from_digraph:
+    try:
+        for netlist in circuits_iter:
             n += 1
             if not dry_run:
                 db.add(netlist)
@@ -1012,6 +1134,9 @@ def _generate_for_dag_size(
                 _print_filter_stats(all_counting_filters, dag_size)
                 last_status_time = now
                 last_status_n = n
+    finally:
+        # Stops the workers (and nauty) if we leave early: user quit, Ctrl-C, or an error.
+        circuits_iter.close()
 
     _print_filter_stats(all_counting_filters, dag_size)
     print(f"Generated {n} circuits for DAG size {dag_size}")

@@ -524,7 +524,10 @@ def test_view_circuits_shows_each_matching_circuit_with_id_in_title_prefix(tmp_p
 
     mock_display = MagicMock()
     mock_display.show_netlist.return_value = False  # never quit early
-    monkeypatch.setattr(cli, 'circuit_generator_display', mock_display)
+    # cmd_view_circuits imports the display module when it runs; patch what that import finds.
+    import rysy_dl
+    monkeypatch.setattr(rysy_dl, 'circuit_generator_display', mock_display, raising=False)
+    monkeypatch.setitem(sys.modules, 'rysy_dl.circuit_generator_display', mock_display)
     args = argparse.Namespace(db_name=db_path, id=None,
                               **{name: None for name in cli.VIEW_CIRCUITS_FILTERS})
     args.num_inputs = 3
@@ -807,3 +810,55 @@ def test_cmd_generate_circuits_rejects_bad_edge_limits(tmp_path, capsys, name, v
         cli.cmd_generate_circuits(make_args(db_name=str(tmp_path / "c.db"), **{name: value}))
 
     assert message in capsys.readouterr().err
+
+
+# ── workers ───────────────────────────────────────────────────────────────────
+
+
+def test_generate_circuits_parses_workers_option(monkeypatch):
+    received = []
+    monkeypatch.setattr(cli, 'cmd_generate_circuits', received.append)
+    monkeypatch.setattr(sys, 'argv', ['rysy_dl', 'generate-circuits', 'foo.db', '--workers', '6'])
+
+    cli.main()
+
+    assert received[0].workers == 6
+
+
+@pytest.mark.parametrize("given, expected", [(None, 1), (0, 0), (6, 6)])
+def test_cmd_generate_circuits_passes_workers_through(tmp_path, monkeypatch, given, expected):
+    monkeypatch.setattr(cli.circuit_database, 'create', lambda p: None)
+    monkeypatch.setattr(cli.circuit_database, 'CircuitDatabase', lambda p: FakeDB())
+    calls = {}
+    monkeypatch.setattr(cli, 'generate_circuits_in_ranges', lambda **kw: calls.update(kw))
+
+    cli.cmd_generate_circuits(make_args(db_name=str(tmp_path / "c.db"), workers=given))
+
+    assert calls['workers'] == expected
+
+
+def test_cmd_generate_circuits_rejects_negative_workers(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        cli.cmd_generate_circuits(make_args(db_name=str(tmp_path / "c.db"), workers=-2))
+
+    assert "'workers' must be 0 (one per CPU) or more" in capsys.readouterr().err
+
+
+def test_cmd_generate_circuits_rejects_workers_with_show_graphs(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        cli.cmd_generate_circuits(make_args(db_name=str(tmp_path / "c.db"), workers=4, show_graphs=True))
+
+    assert "'show_graphs' needs workers 1" in capsys.readouterr().err
+
+
+def test_importing_the_cli_does_not_start_a_gui():
+    """Every generate-circuits --workers process imports the CLI module; matplotlib's GUI (a Dock
+    icon per process on macOS) must not come with it."""
+    import subprocess
+    # pyplot itself may be imported (schemdraw does), which is harmless; creating a figure is
+    # what makes the process a GUI app.
+    code = ("import sys, rysy_dl.cli; "
+            "plt = sys.modules.get('matplotlib.pyplot'); "
+            "print('rysy_dl.circuit_generator_display' in sys.modules, bool(plt and plt.get_fignums()))")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
+    assert out.split() == ['False', 'False']

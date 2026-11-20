@@ -20,7 +20,7 @@ size passes the filters.)
  internal gates, not just the sinks) and `--reject-redundant-inputs` (no gate input can be removed without
  changing the output). See `notes.txt` for how its variety compares with the earlier sinks-only database.
  `scripts/generate_dbs.sh` also passes `--max-extra-edges 7`, which leaves nothing out (no passing circuit has more
- than 7 edges beyond two per gate) but halves the build time.
+ than 7 edges beyond two per gate) but cuts about 40% of the build time.
 
 
 `circuit_templates_n3-8.sqlite` (2.1MB): Circuit templates. It contains one example circuit for each DAG shape with 3 to 8 nodes (2-7 inputs, 1-6 core gates). These example circuits contain only `AND` gates.

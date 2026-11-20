@@ -2558,3 +2558,88 @@ def test_generate_circuits_edge_limits_match_filtering_the_unlimited_output(outp
     expected = [g for g in unlimited if edges_within_limits(g, **limits)]
     assert 0 < len(limited) < len(unlimited)
     assert sorted(sorted(g.edges()) for g in limited) == sorted(sorted(g.edges()) for g in expected)
+
+
+# ── workers ───────────────────────────────────────────────────────────────────
+
+import rysy_dl.circuit_generator as _cg  # noqa: E402
+from rysy_dl.circuit_generator import resolve_workers, DEFAULT_ALL_GATE_ASSIGNMENT_FILTERS  # noqa: E402
+from rysy_dl.circuit_filters import no_redundant_gate_inputs  # noqa: E402
+
+
+def _circuit_key(g):
+    # Node and edge order included: a parallel run must add the very same circuits, built the
+    # same way, in the same order.
+    return tuple(g.nodes(data='gate')), tuple(g.edges())
+
+
+def _generate_with_workers(workers, capsys, **overrides):
+    db = _RecordingDB()
+    kwargs = dict(db=db, dag_size=4, min_num_source=2, max_num_source=3,
+                  min_num_inputs=2, max_num_inputs=6, min_num_outputs=1, max_num_outputs=5,
+                  gate_assignment='all', not_gates='all', output_connections='any',
+                  circuit_filters=DEFAULT_ALL_GATE_ASSIGNMENT_FILTERS + (no_redundant_gate_inputs,),
+                  display_circuits=False, output_dir=None, quiet=True, workers=workers,
+                  status_interval=1e9)
+    kwargs.update(overrides)
+    capsys.readouterr()
+    count = generate_circuits(**kwargs)
+    return count, [_circuit_key(g) for g in db.added], capsys.readouterr().out
+
+
+@pytest.mark.skipif(
+    not _real_nauty_available(),
+    reason="real geng/directg binaries not found (set $NAUTY, or put them on PATH)",
+)
+@pytest.mark.parametrize("window", ["default", "tiny"])
+def test_parallel_generation_matches_serial(capsys, monkeypatch, window):
+    """Same circuits, same order, same filter stats with 2 workers as with 1. 'tiny' sends one
+    shape per batch and keeps only one batch per worker outstanding, which exercises waiting on
+    the oldest batch while later shapes queue up."""
+    serial = _generate_with_workers(1, capsys)
+    if window == "tiny":
+        monkeypatch.setattr(_cg, '_WORKER_BATCH_SIZE', 1)
+        monkeypatch.setattr(_cg, '_PENDING_BATCHES_PER_WORKER', 1)
+    parallel = _generate_with_workers(2, capsys)
+
+    assert serial[0] > 100
+    assert parallel[0] == serial[0]
+    assert parallel[1] == serial[1]
+    assert parallel[2] == serial[2]  # the "Filter stats" report and the total
+
+
+@pytest.mark.skipif(
+    not _real_nauty_available(),
+    reason="real geng/directg binaries not found (set $NAUTY, or put them on PATH)",
+)
+def test_parallel_generation_with_edge_limits_and_sinks_matches_serial(capsys):
+    options = dict(output_connections='sinks', max_extra_edges=1, dag_size=6, min_num_source=3)
+    assert _generate_with_workers(2, capsys, **options) == _generate_with_workers(1, capsys, **options)
+
+
+def test_parallel_circuits_stops_its_workers_when_closed():
+    maker = _cg._CircuitMaker('and-only', 'none', ())
+    shapes = (_add_single_sink(nauty_to_networkx("3 2 0 2 1 2")) for _ in range(1000))
+    circuits = _cg._parallel_circuits(shapes, maker, 2)
+    assert next(circuits) is not None
+    circuits.close()  # must return promptly, not wait for the other 999 shapes
+
+
+def test_parallel_generation_rejects_unpicklable_filters():
+    with pytest.raises(ValueError, match="module-level functions"):
+        _run_generate_circuits(["2 0"], _RecordingDB(), gate_assignment='all',
+                               circuit_filters=(lambda g: True,), workers=2)
+
+
+def test_parallel_generation_rejects_display_circuits():
+    with pytest.raises(ValueError, match="display_circuits needs workers=1"):
+        _run_generate_circuits(["2 0"], _RecordingDB(), display_circuits=True, workers=2)
+
+
+def test_resolve_workers():
+    assert resolve_workers(1) == 1
+    assert resolve_workers(6) == 6
+    assert resolve_workers(0) == (os.cpu_count() or 1)
+    assert resolve_workers(None) == (os.cpu_count() or 1)
+    with pytest.raises(ValueError):
+        resolve_workers(-1)

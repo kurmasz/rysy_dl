@@ -19,11 +19,12 @@ rysy_dl generate-circuits --num-inputs 2-7 --num-gates 1-6 --max-nodes 8 --gate-
 #
 # --max-extra-edges 7 leaves out nothing: built without a limit (2026-11-20), the most edges beyond
 # two per gate in any passing circuit was 7 (4 inputs, 4 gates, 15 edges). It skips the denser
-# graphs, about half of the work, none of which produce a circuit that passes the filters. If the
+# graphs, about 40% of the work, none of which produce a circuit that passes the filters. If the
 # filters or ranges change, rebuild once without the limit and check that it is still lossless.
+# --workers 0 uses every CPU; the result is the same as with one worker.
 db="$DB_DIR/concrete_circuits_n4-8.sqlite"
 rysy_dl generate-circuits --num-inputs 2-4 --num-gates 2-4 --max-nodes 8 --gate-assignment all --not-gates all \
-    --output-connections any --reject-redundant-inputs --max-extra-edges 7 "$db"
+    --output-connections any --reject-redundant-inputs --max-extra-edges 7 --workers 0 "$db"
 
 # circuit_templates_n3-9: and-only templates of 3 to 9 nodes.
 db="$DB_DIR/circuit_templates_n3-9.sqlite"

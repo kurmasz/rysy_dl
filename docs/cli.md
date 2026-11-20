@@ -24,3 +24,18 @@ with at most 12 edges (`--max-extra-edges 4`) are 92% of what passes but about 7
 Passing circuits do not thin out steadily as edges increase, though (4 inputs and 4 gates: 928
 with 13 edges, 576 with 14, 2,496 with 15), so a limit can leave out circuits a larger limit
 would find.
+
+### Parallel generation: `--workers N`
+
+`--workers N` runs the expensive part of generation (every gate assignment, every NOT pattern, and
+the circuit filters, for each circuit shape) in N processes. `--workers 0` uses one per CPU. nauty,
+the structural filters (fan-in, fan-out, sources, edge limits), and all database writes stay in
+the main process, which hands shapes to the workers a few at a time and collects their circuits in
+order. So the database, the order of its rows, and the filter stats are the same for any number of
+workers.
+
+Expect a speed-up of roughly the number of performance cores. Notes:
+
+* `--show-graphs` needs `--workers 1`, since it waits for a keypress after each circuit.
+* Each DAG size starts its own pool of workers, which takes a second or two, so for small, quick
+  runs (e.g. `--gate-assignment and-only`) more workers don't help.

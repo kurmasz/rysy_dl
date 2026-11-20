@@ -12,7 +12,6 @@ import os
 import pickle
 import sys
 from . import circuit_database
-from . import circuit_generator_display
 from .circuit_generator import DEFAULT_ALL_GATE_ASSIGNMENT_FILTERS, generate_circuits_in_ranges, plan_dag_sizes
 from .circuit_filters import no_redundant_gate_inputs
 from .circuit_analyzer import circuit_to_expression
@@ -70,6 +69,7 @@ GENERATE_CIRCUITS_DEFAULTS = {
     'if_exists': None,
     'dry_run': False,
     'status_interval': 10.0,
+    'workers': 1,
 }
 
 GENERATE_CIRCUITS_CHOICES = {
@@ -99,6 +99,7 @@ GENERATE_CIRCUITS_TYPES = {
     'if_exists': str,
     'dry_run': bool,
     'status_interval': float,
+    'workers': int,
 }
 
 TRUE_STRINGS = ('true', 'yes', 'on', '1')
@@ -223,6 +224,13 @@ def cmd_generate_circuits(args):
         print(f"Error: 'max_extra_edges' must be at least 0, got {args.max_extra_edges!r}", file=sys.stderr)
         sys.exit(1)
 
+    if args.workers < 0:
+        print(f"Error: 'workers' must be 0 (one per CPU) or more, got {args.workers!r}", file=sys.stderr)
+        sys.exit(1)
+    if args.workers != 1 and args.show_graphs:
+        print("Error: 'show_graphs' needs workers 1 (it waits for a keypress after each circuit)", file=sys.stderr)
+        sys.exit(1)
+
     if args.reject_redundant_inputs and args.gate_assignment != 'all':
         print("Error: 'reject_redundant_inputs' requires gate_assignment 'all'", file=sys.stderr)
         sys.exit(1)
@@ -254,6 +262,7 @@ def cmd_generate_circuits(args):
         output_dir=args.output_dir,
         nauty_dir=args.nauty_dir,
         status_interval=args.status_interval,
+        workers=args.workers,
     )
 
     if args.dry_run:
@@ -342,6 +351,12 @@ def cmd_view_circuits(args):
         sys.exit(1)
 
     try:
+        # Imported only here: on import it creates a matplotlib figure, which on macOS makes the
+        # process a GUI app (a Dock icon). Imported at the top of this module, that happened in
+        # every run -- and in every generate-circuits --workers process, since each one imports
+        # this module.
+        from . import circuit_generator_display
+
         with circuit_database.CircuitDatabase(args.db_name) as db:
             if args.id is not None:
                 record = db.get_entry(args.id)
@@ -455,6 +470,11 @@ def main():
     gc_parser.add_argument('--dry-run', action=argparse.BooleanOptionalAction, default=None,
                             help='Run generation without writing to the database. The database file is '
                                  'never created, opened, or modified (default: False)')
+    gc_parser.add_argument('--workers', type=int, default=None, metavar='N',
+                            help='Number of processes that assign gates and NOT gates and run the circuit '
+                                 'filters (nearly all of the work). 0 means one per CPU. The database, its '
+                                 'order, and the filter stats are the same for any number of workers '
+                                 '(default: 1)')
     gc_parser.add_argument('--status-interval', type=float, default=None,
                             help='Seconds between progress updates (default: 10)')
     gc_parser.set_defaults(func=cmd_generate_circuits)
