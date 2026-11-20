@@ -42,9 +42,10 @@ rysy_dl = "rysy_dl.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-# Only the default database ships in the wheel; larger databases placed in db/
-# are for local use and would exceed PyPI's file-size limit.
-"rysy_dl.db" = ["rysy_dag_only_4-7.sqlite"]
+# Only the default database (concrete_circuits_n4-8, ~34MB) and the small and-only templates
+# ship in the wheel; larger databases placed in db/ are for local use and would exceed PyPI's
+# file-size limit.
+"rysy_dl.db" = ["concrete_circuits_n4-8.sqlite", "circuit_templates_n3-8.sqlite"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

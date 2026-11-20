@@ -10,8 +10,8 @@ with no extra wiring needed in either case.
 from pathlib import Path
 
 DB_DIR = Path(__file__).parent
-DEFAULT_DB_PATH = DB_DIR / 'rysy_and_only_4-7.sqlite'
-DEFAULT_DB_PATH = DB_DIR / 'enumerate_all_4-7.sqlite'
+DEFAULT_DB_PATH = DB_DIR / 'circuit_templates_n3-8.sqlite'
+DEFAULT_DB_PATH = DB_DIR / 'concrete_circuits_n4-8.sqlite'
 
 def resolve_db_path(db_path):
     """

@@ -1,12 +1,4 @@
 
-Ideas:
-   * Completely enumerate all "good" circuits with 2 inputs.  There are relatively 
-     few of them, because as the number of nodes increase, the vast majority of 
-     circuits become "dumb" (trivially simplifiable)
-   * May also be true of 3 input circuits.
-
-
-
 8 nodes produces 20 Million starting points. 
 9 nodes produces 3.4 Billion starting points
 

@@ -25,8 +25,10 @@ RSYNC_OPTS=(-av --delete
     --exclude 'temp_out/'
     # The course's db/.gitignore keeps large databases out of the course repo; leave it alone.
     --exclude '.gitignore'
-    # Ship only the default database. Excluded files are also left untouched in DEST.
-    --include 'db/rysy_dag_only_4-7.sqlite'
+    # Ship only the default database and the small and-only templates. Excluded files are also
+    # left untouched in DEST. (The course's db/.gitignore must allow the same files.)
+    --include 'db/concrete_circuits_n4-8.sqlite'
+    --include 'db/circuit_templates_n3-8.sqlite'
     --exclude 'db/*.sqlite'
 )
 

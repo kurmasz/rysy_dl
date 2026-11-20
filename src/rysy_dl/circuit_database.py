@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
 """
 
 # Lets the usual question queries read only the matching rows instead of the whole table: for
-# enumerate_all_4-7, a 3-input query reads 0.8 MB instead of 28 MB, for 5.6 MB more on disk.
+# concrete_circuits_n4-8, a 3-input query reads 0.8 MB instead of 28 MB, for 5.6 MB more on disk.
 # It speeds up queries but doesn't change what's stored, so it isn't part of FORMAT_VERSION;
 # `upgrade` adds it to databases created without it.
 INDEX_NAME = f"{TABLE_NAME}_by_size"
@@ -244,7 +244,7 @@ class CircuitDatabase:
         :param db_path: Filesystem path where the sqlite database lives. Must already exist -- use
                          `create_database` to create a new database file. Defaults to
                          `rysy_dl.db.DEFAULT_DB_PATH`, the database packaged with rysy_dl. A string
-                         prefixed with '@' (e.g. ``'@rysy_dag_only_4-8.sqlite'``) is resolved against
+                         prefixed with '@' (e.g. ``'@circuit_templates_n3-9.sqlite'``) is resolved against
                          the `rysy_dl.db` package directory instead.
         :param commit_every: Commit after this many `add` calls since the last commit.
                               Larger values amortize the commit cost over more rows, at the cost of
@@ -488,7 +488,7 @@ def create(db_path):
     don't pay a separate reconnect for every operation.
 
     :param db_path: Filesystem path where the sqlite database should live. A string prefixed with
-                    '@' (e.g. ``'@rysy_dag_only_4-8.sqlite'``) is resolved against the `rysy_dl.db`
+                    '@' (e.g. ``'@circuit_templates_n3-9.sqlite'``) is resolved against the `rysy_dl.db`
                     package directory instead.
     """
     conn = sqlite3.connect(resolve_db_path(db_path))
@@ -579,7 +579,7 @@ def upgrade(db_path):
             raise
         if rewrite_rows:
             # Rewriting every row leaves pages partly empty (filling in num_gates_core alone made
-            # enumerate_all_4-7 about 12% larger, and shorter graph blobs leave even more gaps).
+            # concrete_circuits_n4-8 about 12% larger, and shorter graph blobs leave even more gaps).
             # VACUUM repacks the file.
             conn.execute("VACUUM")
         return changes
